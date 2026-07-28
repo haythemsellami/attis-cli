@@ -123,12 +123,14 @@ servers** so codex/kimi/other clients can call them.
 
 ```
 vllm serve unsloth/Qwen3.5-9B --enable-lora \
-  --lora-modules orgia=/workspace/adapters/phase3f-7b-v6 \
+  --lora-modules orgia=/workspace/adapters/qwen35-9b-v61 \
   --max-lora-rank 64 --language-model-only \
   --max-model-len 131072 --kv-cache-dtype fp8 --reasoning-parser qwen3
 ```
 
-- Current model: phase3f champion (LoRA on `unsloth/Qwen3.5-9B`), **thinking ON**.
+- Current line: Qwen3.5-9B adapters (`qwen35-9b-v61` probe), **thinking ON**.
+  The 7B champion `phase3f-7b-v6` (LoRA on `Qwen/Qwen2.5-Coder-7B-Instruct`)
+  is the legacy reference for eval deltas.
 - Adapters are swappable LoRA modules (`--lora-modules name=path`).
 - Generation budget default: 32k tokens (probe showed thinking traces need it);
   per-tool overrides allowed.
