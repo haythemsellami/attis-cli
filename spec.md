@@ -224,9 +224,9 @@ attis-cli/
 
 ## 15. Open questions
 
-- **[OPEN]** Does Pi's provider layer accept a local vLLM `base_url` cleanly? (spike q1)
-- **[OPEN]** Qwen3.5 thinking traces: pass-through of `reasoning_content` / thinking kwargs — adapter needed? (spike q2)
-- **[OPEN]** Pi extension points: package-on-top sufficient, or fork required for the custom loop phases? (spike q3)
+- **[ANSWERED — spike, 2026-07-29]** Does Pi's provider layer accept a local vLLM `base_url` cleanly? **Yes.** `createProvider({ baseUrl, api: openAICompletionsApi(), auth, models })` + `models.setProvider()` — no closed registry. Gotchas handled in `packages/serving`: keyless servers need a dummy API key; `Model.compat` must pin `maxTokensField: "max_tokens"`, `supportsStore: false`, `supportsReasoningEffort: false` (auto-detect guesses wrong for unknown base URLs).
+- **[ANSWERED — spike]** Qwen3.5 thinking traces: pass-through of `reasoning_content` — **works natively.** pi-ai's openai-completions stream parser maps `reasoning_content`/`reasoning`/`reasoning_text` into `ThinkingContent` + `thinking_start/delta/end` events (verified: 370 thinking deltas in one audit). No adapter needed.
+- **[ANSWERED — spike]** Pi extension points: **package-on-top confirmed.** Custom `AgentTool` registration is array-based (no registry); `beforeToolCall` approval hook blocks with a reason that reaches the model (verified: fork_verify call gated, model adapted). No fork required. Watch: pass `streamFn` explicitly; approval hooks must be re-entrancy-safe under parallel tool execution (we use `sequential`); pin all `@earendil-works/*` deps to the same version.
 - **[OPEN]** RPC provider choice (Alchemy default) and its rate limits under fork-verify load.
 - **[OPEN]** TUI framework surface vs headless parity — keep both in lockstep from day one.
 

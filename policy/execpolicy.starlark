@@ -1,0 +1,7 @@
+# attis execpolicy — declarative rules for what may execute (spec §6).
+# Loaded at startup, self-tested. Spike placeholder: the fork layer is stubbed;
+# these rules document the intended policy shape.
+prefix_rule(pattern=["forge", "test"], decision="allow")
+prefix_rule(pattern=["anvil", "--fork-url"], decision="allow")
+prefix_rule(pattern=["cast", "send", "--private-key"], decision="forbidden")
+prefix_rule(pattern=["*", "curl", "*"], decision="prompt")

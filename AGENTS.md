@@ -51,12 +51,18 @@ This repo is open source. The model work is not. The line:
 ## Stack & conventions
 
 - TypeScript; Pi framework (`earendilworks/pi`) as base — package-on-top,
-  not a fork (the spike may revisit this; spec §15).
-- pnpm monorepo per spec §13: `packages/{core,tools,serving,journal,rpc,tui}`.
-- Build/test/lint commands land here with the first code — keep this file
-  current as they become real.
+  **confirmed by the spike** (spec §15); no fork needed.
+- pnpm monorepo per spec §13: `packages/{serving,core}` now, `{tools,journal,rpc,tui}` next.
+- Pin all `@earendil-works/*` deps to the same version (currently `0.82.1`).
+- Commands:
+  - `pnpm install` — install deps
+  - `pnpm typecheck` — strict tsc over all packages
+  - `pnpm attis audit <file.sol> -- --output stream-json` — headless audit
+    (env: `ATTIS_BASE_URL`, `ATTIS_API_KEY`, `ATTIS_MODEL`, `ATTIS_ALLOW_FORK=1`
+    to un-gate fork_verify)
 
 ## Status
 
-Pre-spike. Next: milestone 1 spike (spec §14) answering the three open
-questions in spec §15.
+Spike done (milestone 1): provider, thinking pass-through, tool gating all
+verified live against DeepSeek; spec §15 holds the answers. Next: milestone
+v1 loop (hypothesize → PoC → fork-verify → report) + the real fork layer.
