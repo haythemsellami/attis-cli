@@ -209,7 +209,8 @@ attis-cli/
 ├── policy/
 │   └── execpolicy.starlark
 ├── mcp/               # MCP servers (fork_verify, slither, judge)
-└── spec.md            # this file
+└── docs/
+    └── spec.md        # this file
 ```
 
 ## 14. Milestones

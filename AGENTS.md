@@ -1,7 +1,7 @@
 # AGENTS.md — attis-cli
 
 > Operating rules for the attis-cli repo (the harness that drives Orgia).
-> Read `spec.md` first — it is the source of truth for design decisions.
+> Read `docs/spec.md` first — it is the source of truth for design decisions.
 
 ## Project context
 
@@ -38,7 +38,7 @@ This repo is open source. The model work is not. The line:
   leave work unpushed at the end of a session.
 - No force-push to `main`, no history rewrites on pushed commits.
 
-## Design invariants (from spec.md — do not regress)
+## Design invariants (from docs/spec.md — do not regress)
 
 1. **Verify, don't guess.** A finding ships only if a PoC proves it on a fork.
 2. **Events-first.** No interaction exists in the TUI that is not available
