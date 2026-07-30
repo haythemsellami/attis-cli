@@ -64,5 +64,7 @@ This repo is open source. The model work is not. The line:
 ## Status
 
 Spike done (milestone 1): provider, thinking pass-through, tool gating all
-verified live against DeepSeek; spec §15 holds the answers. Next: milestone
-v1 loop (hypothesize → PoC → fork-verify → report) + the real fork layer.
+verified live against DeepSeek; spec §15 holds the answers. Current
+milestone: **v1** — ordered work items + acceptance criteria in
+`docs/roadmap.md`. Scope rule (from the roadmap): before any work on the
+NEXT milestone starts, `docs/roadmap.md` must be updated first.
