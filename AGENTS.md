@@ -57,6 +57,7 @@ This repo is open source. The model work is not. The line:
 - Commands:
   - `pnpm install` — install deps
   - `pnpm typecheck` — strict tsc over all packages
+  - `pnpm test` — vitest (packages/*/test)
   - `pnpm attis audit <file.sol> -- --output stream-json` — headless audit
     (env: `ATTIS_BASE_URL`, `ATTIS_API_KEY`, `ATTIS_MODEL`, `ATTIS_ALLOW_FORK=1`
     to un-gate fork_verify)
