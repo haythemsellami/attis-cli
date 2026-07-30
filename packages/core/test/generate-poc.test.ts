@@ -65,3 +65,23 @@ describe("generate_poc", () => {
 		).rejects.toThrow("endpoint error");
 	});
 });
+
+describe("extractPocCode", () => {
+	it("strips prose, keeps the largest fenced block", async () => {
+		const { extractPocCode } = await import("../src/tools/generate-poc.js");
+		const out = "Below is a concrete Foundry test:\n\n```solidity\ncontract PocTest is Test {}\n```\n\nSome more prose.\n\n```\ncontract Small {}\n```";
+		expect(extractPocCode(out)).toBe("contract PocTest is Test {}");
+	});
+
+	it("keeps bare-solidity output as-is", async () => {
+		const { extractPocCode } = await import("../src/tools/generate-poc.js");
+		const out = "pragma solidity ^0.8.0;\ncontract PocTest is Test {}";
+		expect(extractPocCode(out)).toBe(out);
+	});
+
+	it("handles no-fence output with prose start", async () => {
+		const { extractPocCode } = await import("../src/tools/generate-poc.js");
+		const out = "The vulnerability is a classic reentrancy. contract X {}";
+		expect(extractPocCode(out)).toBe(out); // compiler error will drive the retry
+	});
+});

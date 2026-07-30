@@ -29,6 +29,12 @@ const Params = Type.Object({
 	contract_code: Type.String({
 		description: "The vulnerable contract source the PoC targets.",
 	}),
+	retry_hint: Type.Optional(
+		Type.String({
+			description:
+				"Revert trace or failure note from a previous PoC attempt — fix the PoC to address it.",
+		}),
+	),
 });
 
 export interface GeneratePocConfig {
@@ -42,11 +48,37 @@ export function buildPocUserPrompt(
 	findingTitle: string,
 	findingImpact: string | undefined,
 	contractCode: string,
+	retryHint?: string,
 ): string {
 	const impact = findingImpact ? `\nImpact: ${findingImpact}` : "";
+	const retry = retryHint
+		? `\n\nA previous PoC attempt failed with:\n${retryHint}\nFix the PoC to address this.`
+		: "";
 	return `This contract has a vulnerability. Write the exploit that proves it:\n\n` +
 		`Vulnerability: ${findingTitle}${impact}\n\n` +
-		`\`\`\`solidity\n${contractCode}\n\`\`\``;
+		`\`\`\`solidity\n${contractCode}\n\`\`\`${retry}`;
+}
+
+const FENCE_RE = /```(?:solidity|sol)?\s*\n([\s\S]*?)```/g;
+
+/**
+ * Extract compilable Solidity from a PoC generation: the model wraps code in
+ * prose ("Below is a Foundry test..."), and prose in a .sol file fails the
+ * compiler. Prefer the LARGEST fenced block; fall back to the whole output
+ * only when it already looks like bare Solidity (starts with pragma/contract).
+ */
+export function extractPocCode(output: string): string {
+	const blocks = [...output.matchAll(FENCE_RE)]
+		.map((m) => m[1].trim())
+		.filter(Boolean);
+	if (blocks.length > 0) {
+		return blocks.reduce((a, b) => (b.length >= a.length ? b : a));
+	}
+	const trimmed = output.trim();
+	if (/^(pragma|contract|library|interface|import|\/\/|\/\*)/.test(trimmed)) {
+		return trimmed;
+	}
+	return trimmed;
 }
 
 export function createGeneratePocTool(cfg: GeneratePocConfig): AgentTool<typeof Params> {
@@ -67,6 +99,7 @@ export function createGeneratePocTool(cfg: GeneratePocConfig): AgentTool<typeof 
 							params.finding_title,
 							params.finding_impact,
 							params.contract_code,
+							params.retry_hint,
 						),
 					},
 				],
@@ -88,9 +121,10 @@ export function createGeneratePocTool(cfg: GeneratePocConfig): AgentTool<typeof 
 				choices: { message: { content?: string } }[];
 			};
 			const poc = data.choices[0]?.message?.content ?? "";
+			const code = extractPocCode(poc);
 			return {
 				content: [{ type: "text", text: poc }],
-				details: { chars: poc.length },
+				details: { chars: poc.length, code },
 			};
 		},
 	};

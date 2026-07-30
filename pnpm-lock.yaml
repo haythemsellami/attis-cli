@@ -20,6 +20,12 @@ importers:
 
   packages/core:
     dependencies:
+      '@attis/fork':
+        specifier: workspace:*
+        version: link:../fork
+      '@attis/journal':
+        specifier: workspace:*
+        version: link:../journal
       '@attis/serving':
         specifier: workspace:*
         version: link:../serving
@@ -29,6 +35,10 @@ importers:
       '@earendil-works/pi-ai':
         specifier: 0.82.1
         version: 0.82.1(ws@8.21.1)(zod@4.4.3)
+
+  packages/fork: {}
+
+  packages/journal: {}
 
   packages/serving:
     dependencies:
