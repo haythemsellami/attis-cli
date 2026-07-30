@@ -64,8 +64,7 @@ This repo is open source. The model work is not. The line:
 
 ## Status
 
-Spike done (milestone 1): provider, thinking pass-through, tool gating all
-verified live against DeepSeek; spec §15 holds the answers. Current
-milestone: **v1** — ordered work items + acceptance criteria in
-`docs/roadmap.md`. Scope rule (from the roadmap): before any work on the
-NEXT milestone starts, `docs/roadmap.md` must be updated first.
+**v1 COMPLETE (2026-07-30)** — all roadmap exit criteria met (verified loop
+on fixture, safe case, tests, journal). attis-cli is parked: NO new
+implementation without discussing it with the user first (their explicit
+rule). Next milestone work starts by rewriting `docs/roadmap.md` for v2.

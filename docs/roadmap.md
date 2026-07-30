@@ -1,9 +1,13 @@
-# attis-cli Roadmap — Milestone v1
+# attis-cli Roadmap — Milestone v1 ✅ COMPLETE (2026-07-30)
 
 > **Scope rule:** this document covers ONLY the current milestone. Before any
 > work starts on the NEXT milestone, this file must be updated first — the
 > next milestone's roadmap is written then, informed by what this one taught
 > us. The spec (`docs/spec.md`) is the contract; this file is the ordered how.
+>
+> **v1 status: COMPLETE.** All exit criteria met (see Done-when). Output
+> contract decision: (a) prose-contract parsing for findings now; (b)
+> tool-call findings smoke test deferred to v2 (see `docs/vision-versions.md`).
 
 **Milestone v1 (spec §14.2):** the full loop on per-contract input —
 `audit → hypothesize → PoC → fork-verify → report`. Only fork-verified
@@ -76,13 +80,16 @@ export.
 session from its journal; journal entry for a verified finding maps 1:1 to a
 training-row shape.
 
-## Done-when (v1 exit criteria)
+## Done-when (v1 exit criteria) — ALL MET 2026-07-30
 
-1. `attis audit examples/vulnerable-vault.sol --output stream-json` →
+1. ✅ `attis audit examples/vulnerable-vault.sol --verify --output stream-json` →
    verified reentrancy finding in the final report, real anvil+forge run
-2. Same command on a safe contract → report ships zero findings
-3. `pnpm typecheck` clean; parser + fork + loop unit tests green
-4. Journal for both sessions exists, inspectable, flywheel-shaped
+   (verified: 1, dropped: 0)
+2. ✅ Same command on a safe contract → zero findings shipped (safeVerdict)
+3. ✅ `pnpm typecheck` clean; 19 tests green (parser, generate_poc, fork
+   integration incl. real anvil+forge)
+4. ✅ Journal for both sessions exists at `~/.attis/sessions/`, replayable via
+   `attis inspect <events.jsonl>`, flywheel-shaped
 
 ## Explicitly NOT in v1
 
