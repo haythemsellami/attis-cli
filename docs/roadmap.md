@@ -1,98 +1,90 @@
-# attis-cli Roadmap — Milestone v1 ✅ COMPLETE (2026-07-30)
+# attis-cli Roadmap — Milestone v2
 
-> **Scope rule:** this document covers ONLY the current milestone. Before any
-> work starts on the NEXT milestone, this file must be updated first — the
-> next milestone's roadmap is written then, informed by what this one taught
-> us. The spec (`docs/spec.md`) is the contract; this file is the ordered how.
->
-> **v1 status: COMPLETE.** All exit criteria met (see Done-when). Output
-> contract decision: (a) prose-contract parsing for findings now; (b)
-> tool-call findings smoke test deferred to v2 (see `docs/vision-versions.md`).
+> **Scope rule:** this document covers ONLY the current milestone. v1 is
+> complete (see Done-when, all met 2026-07-30). Before any work on v3, this
+> file must be rewritten first. The spec (`docs/spec.md`) is the contract;
+> `docs/vision-versions.md` is the milestone map.
 
-**Milestone v1 (spec §14.2):** the full loop on per-contract input —
-`audit → hypothesize → PoC → fork-verify → report`. Only fork-verified
-findings ship (spec principle 1). Done means: `attis audit <contract.sol>`
-produces a report containing *verified* findings end-to-end, with every step
-journaled.
+**Milestone v2:** make attis-cli the rollout environment for Orgia — the
+machine that (a) drives the model with real tools over real repos, (b)
+verifies findings on forks at throughput, and (c) exports every session as
+training data for orgia-llm v8 (the flywheel + the RLVR reward foundation).
 
-## Environment prerequisites
-
-- `forge` + `anvil` (foundry) on PATH
-- `ALCHEMY_API_KEY` (or `ATTIS_RPC_URL`) in env for fork endpoints
-- A serving endpoint: local vLLM subprocess or pod-mode (milestone v2 concern;
-  v1 uses the env-configured endpoint from the spike)
+Context anchors (from orgia-llm iterations 8–10): the model is fragment-elite
+and whole-file-weak; it folds at contract boundaries; fabrication exists on
+safe code. The harness answers with: dependency-pursuit tools, fork-gated
+precision, and trace export.
 
 ## Work items (in order)
 
-### 1. Findings parser (TS) — `packages/core/findings.ts`
+### 1. Tool-call reliability smoke (decides the output contract)
 
-Port of orgia-llm's `parse_model_output` semantics to TypeScript: model
-output → typed `Finding[]` (severity, title, impact, poc, remediation) +
-safe-verdict detection. Strict mode fails loudly on non-conforming output.
+Before building tool-driven flows: verify the fine-tuned 9B drives native
+tool calls reliably (LoRAs never saw tool schemas). Serve an adapter, prompt
+with a fetch tool schema, measure call validity/argument quality across ~50
+prompts.
 
-*Acceptance:* unit tests pass on real v7 eval outputs (structured, multi-
-finding, safe, and adversarial/malformed samples); zero regex-only guesses —
-a finding either parses fully or is flagged unparseable.
+*Acceptance:* >95% schema-valid tool calls, or we fall back to structured
+text markers ("I need file X") parsed deterministically. Recorded verdict
+informs items 2 and 4.
 
-### 2. `generate_poc` tool (exploit mode) — `packages/core/tools/generate-poc.ts`
+### 2. `fetch_dependency` / repo-read tool — `packages/core/tools/`
 
-Invokes the model with the **trained exploit-mode system prompt** (ported
-from orgia-llm `system_prompt.py`), given a finding + the contract code.
-Not a generic "write an exploit" prompt — the model's own trained format.
+The scope-expansion tool: the model requests a file it can't see (import,
+interface, proxy target), the harness returns it from the mounted repo.
+Includes scope discovery (`audit_repo` inventory: file list, imports graph).
 
-*Acceptance:* produces a PoC in the trained exploit format for the fixture
-reentrancy; registered in the tool registry, `llm` type, auto-approved.
+*Acceptance:* on a multi-file fixture (vault + oracle), the model requests
+the dependency mid-audit and its finding cites the interaction; tool is
+read-only, auto-approved, journaled.
 
-### 3. Fork layer — `packages/fork/`
+### 3. Rollout mode — `bin/attis rollout <repo-dir>`
 
-- anvil process manager: spawn `anvil --fork-url $RPC_URL [--fork-block-number N]`,
-  health-check, kill on exit, **restart-on-death** (spec §5 ForkDied handler)
-- forge runner: materialize a test workspace (PoC contract + test), run
-  `forge test`, capture result + traces + state diff
-- verdict: verified = predicted state change observed (balance/storage/revert)
+Batch driver: for each repo (scabench tarball set, C4 repos), run the audit
+loop with tools enabled, journal everything. This produces the tool-use
+traces orgia v8 trains on. Sequential per repo, resumable, journal-first.
 
-*Acceptance:* end-to-end on `examples/vulnerable-vault.sol` — a correct PoC
-returns `verified: true`; a broken PoC returns `verified: false` with the
-revert trace attached (the trace is the retry constraint, spec §5). Fork
-killed mid-test → restarted and step re-enqueued, max once.
+*Acceptance:* one full repo rollout completes with tool calls + fork
+verdicts journaled; the trace file exports to orgia-llm's training-row
+format (see item 5) without loss.
 
-### 4. Loop orchestrator — `packages/core/loop.ts`
+### 4. Serving-manager — `packages/serving/`
 
-Step flow (spec §5): audit → parse findings → severity-ordered per finding:
-`generate_poc → fork_verify` (≤2 retries, revert trace as next constraint) →
-drop with `verification_failed` note after that (never reported) → report
-verified only. Sequential per finding; findings processed in severity order.
+Driver interface `start() / health() / stop()` with three drivers:
+`env` (current), `local` (vllm subprocess), `runpod` (pod lifecycle +
+SSH tunnel + **guaranteed stop on exit** — the golden rule by construction).
 
-*Acceptance:* fixture vault → report contains the verified reentrancy;
-`examples/` safe contract → empty verified report (no shipped finding);
-every step request + tool call visible in the event stream and the journal.
+*Acceptance:* `attis audit --pod` runs a full session against a pod and the
+pod is stopped when the CLI exits (verified with a kill -9 test).
 
-### 5. Journal v1 — `packages/journal/`
+### 5. Journal → training-row exporter — `packages/journal/export.ts`
 
-NDJSON session log at `~/.attis/sessions/<workdir>/<id>/`: prompts, step
-requests, tool calls + args, PoC sources, fork responses (state diff), judge
-verdicts, findings. **Flywheel-ready schema**: a verified-finding journal
-entry must contain everything needed to emit an orgia-llm training row
-(prompt code, thinking, finding, PoC, fork verdict) — design for direct
-export.
+Maps journal entries to orgia-llm training rows: (prompt, tool calls,
+analysis, finding, fork verdict) → ShareGPT rows with tool-call structure;
+verified findings → gold positives; failed verifications → hard negatives.
+The flywheel contract.
 
-*Acceptance:* `attis inspect <session>` (even a minimal printer) replays a
-session from its journal; journal entry for a verified finding maps 1:1 to a
-training-row shape.
+*Acceptance:* the v1 fixture session's journal exports a valid training row
+loadable by orgia-llm's pipeline (schema-compatible with train.jsonl).
 
-## Done-when (v1 exit criteria) — ALL MET 2026-07-30
+### 6. slither / score / judge tools (spec §6 registry)
 
-1. ✅ `attis audit examples/vulnerable-vault.sol --verify --output stream-json` →
-   verified reentrancy finding in the final report, real anvil+forge run
-   (verified: 1, dropped: 0)
-2. ✅ Same command on a safe contract → zero findings shipped (safeVerdict)
-3. ✅ `pnpm typecheck` clean; 19 tests green (parser, generate_poc, fork
-   integration incl. real anvil+forge)
-4. ✅ Journal for both sessions exists at `~/.attis/sessions/`, replayable via
-   `attis inspect <events.jsonl>`, flywheel-shaped
+`slither_scan` (static triage, auto-approved read), `score_finding`,
+`judge_semantic` (DeepSeek; asks — network). These round out the registry
+v1 and feed repo-scale ranking in v3.
 
-## Explicitly NOT in v1
+*Acceptance:* slither findings feed into the rollout's region ranking;
+judge calls are gated and journaled.
 
-- Repo-scale decomposition (milestone 3), TUI (v2), MCP servers (v2),
-  pod-mode serving lifecycle (v2), slither/judge tools (v2), RAG (v4)
-- These get roadmap entries when their milestone starts — see the scope rule.
+## Done-when (v2 exit criteria)
+
+1. Tool-call smoke verdict recorded (native tool calls or text-marker fallback)
+2. A repo rollout with dependency pursuit completes end-to-end, journaled
+3. The journal exports a schema-valid orgia-llm training row
+4. `--pod` mode runs + stops the pod automatically (no stray billing)
+5. `pnpm test` + `pnpm typecheck` green
+
+## Explicitly NOT in v2
+
+- TUI (v3), MCP servers (v3), repo-scale decomposition ranking (v3),
+  RLVR training loop (orgia v8+), RAG over exploit corpus (v4)
