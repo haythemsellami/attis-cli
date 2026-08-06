@@ -29,7 +29,7 @@ unless marked **[OPEN]**.
    drivable by other agents: headless stream-json out, JSON-RPC/SDK control in.
 4. **Fork the design, not the repos.** Base = Pi (framework). Patterns stolen
    from kimi-code (loop + tools + permissions), codex (orchestration + policy),
-   nanocodex (Code Mode) — see §10.
+   nanocodex (Code Mode), prime-agent (RLM kernel) — see §16.
 5. **No silent behavior.** No telemetry, no phone-home, no hidden network calls.
    Every tool execution is visible in the journal.
 
@@ -59,8 +59,9 @@ contribution — self-sufficient maintenance assumed.
 │  └────┬──────────────┬───────────────┬──────────────┬───────────┘           │
 │       │              │               │              │                       │
 │  ┌────┴───┐   ┌──────┴─────┐   ┌─────┴──────┐  ┌────┴─────────┐            │
-│  │ vLLM   │   │ Tool layer │   │ Fork layer │  │ Journal      │            │
-│  │ server │   │ (see §6)   │   │ (see §7)   │  │ (see §9)     │            │
+│  │ vLLM   │   │ Kernel +   │   │ Fork layer │  │ Journal      │            │
+│  │ server │   │ executor   │   │ (see §7)   │  │ (see §9)     │            │
+│  │        │   │ (see §6)   │   │            │  │              │            │
 │  └────────┘   └────────────┘   └────────────┘  └──────────────┘            │
 └─────────────────────────────────────────────────────────────────────────────┘
         │                                │
@@ -84,59 +85,78 @@ Modeled on kimi-code's drain-loop + typed request queue (everything is a plugin)
   trace as the next constraint (max 2 retries per hypothesis, then drop with a
   `verification_failed` note — never reported as a finding).
 
-## 6. Tool system
+## 6. Tool system & code mode
 
-Wire format: **OpenAI function calling** (JSON-schema params, `tool_calls`) —
-the de facto standard every provider speaks (vLLM/DeepSeek/GLM/Qwen, and
-Claude via adapter). It keeps us provider-agnostic. (Settled 2026-08; see
-the note below on the model-facing surface.)
+Wire format: **OpenAI function calling — the single runtime wire** (settled
+2026-08 after the v2 smoke + code-mode design review). Native `tool_calls`
+end to end; **no text-marker fallback**. vLLM parses Qwen's native format
+out of the box; TRL/verifiers/prime-rl eat this shape directly; prime-agent
+and any third-party harness can drive Orgia as-is. Provider-agnostic by
+design (vLLM/DeepSeek/GLM/Qwen, Claude via adapter).
 
-**Code mode is fork execution.** Our code mode is not a Python REPL
-(OpenAI's container): the model writes forge tests, the fork sandbox
-executes them, the chain reports ground truth. `fork_verify` IS the code
-mode for this domain.
+**Why not markers (recorded):** the 0/30 smoke (attis v2 item 1) proved the
+v7.x LoRAs lost the base model's tool-calling prior (narrow-SFT
+forgetting). The fix is at the source — orgia v8 trains a code-mode trace
+mix (10–15% of the dataset, native wire) that protects the prior the base
+9B still has. The circular dependency (rollouts need traces; traces need a
+capable model) is bridged by a **teacher**, not a crutch: bootstrap
+rollouts are driven by the base Qwen3.5-9B or deepseek-v4-pro, producing
+traces already in the exact native format.
 
-**Model-facing surface (measured 2026-08):** the current fine-tuned 9B
-adapters emit **zero native tool calls** (0/30 smoke, attis v2 item 1) —
-narrow SFT overwrote the base model's tool-calling prior (catastrophic
-forgetting). So the model speaks to tools through **text markers**
-(`<<fetch: contracts/Oracle.sol>>`) parsed deterministically by the
-harness, NOT `tool_calls`, until orgia v8 trains tool discipline back
-(tool-call data mix, OpenAI wire shape, 5-10% of the dataset). Internal
-tools still use the OpenAI wire; only the model-facing request surface is
-markers.
+**Code mode = persistent kernel + fork substrate.** The model-facing action
+space is ONE tool: `execute_code` — a **persistent IPython kernel** per
+audit session (prime-agent's RLM shape). Fork execution is the *substrate*
+the code drives: foundry + an anvil pool live inside the execution
+environment, so `forge test` output is the ground truth the chain reports.
+A generic REPL tells the model "your script ran"; ours tells it "your
+exploit drained 47 ETH."
 
-Per-tool design (kimi-style): each tool =
-`schema + resolveExecution → { accesses, approvalRule, execute }`.
-The model sees the schema; the harness sees the policy. Tool system prompts
-carry **constraint descriptions** (Claude-style): when to call, how to fill
-arguments, and what NOT to do — the model behaves measurably better with
-these in-context.
+**The audit helper library (where the catalog moved).** The kernel boots
+with a preloaded Python API — the typed-tool catalog reborn as code:
+`fork.create()` / `fork.verify(poc)`, `slither.scan()`, `repo.tree()` /
+`repo.read()`, `snapshot()` / `revert()`. **Minimal now, built for
+extension**: helpers are plain modules registered at kernel bootstrap;
+rollout evidence, not speculation, decides what gets added. Short helper
+calls keep the 9B reliable; arbitrary code stays available for the tail we
+didn't anticipate. New language domains (Rust/Go later) = toolchain in the
+execution image + new helper module + per-domain fine-tune — zero harness
+surgery.
 
-Registry v1 (the moat is the catalog, not the envelope):
+Per-tool design (kimi-style): the one model-facing tool still carries
+`schema + resolveExecution → { accesses, approvalRule, execute }`, and the
+system prompt carries **constraint descriptions** (Claude-style): when to
+execute code, what each helper is for, and what NOT to do (no network, no
+real keys, no writes outside scratch).
 
-| Tool | Type | Accesses | Approval | Notes |
+Registry v2 (model-facing vs harness-side):
+
+| Tool | Face | Accesses | Approval | Notes |
 |---|---|---|---|---|
-| `slither_scan` | read | contract files | auto (read-only) | static pass, JSON findings |
-| `fork_verify` | exec | anvil, forge | policy-gated (execpolicy) | run PoC on fork, return state-diff + traces |
-| `audit_repo` | read | repo files | auto | file discovery for repo-scale audits |
-| `fetch_file` | read | repo files | auto | scope-expansion fetch (marker-driven until v8) |
-| `score_finding` | read | — | auto | custom scorer (port/wrap from Python) |
-| `judge_semantic` | net | DeepSeek API | ask (network) | DeepSeek judge + TP-alt; `judge_control` trust check |
-| `generate_poc` | llm | model | auto | exploit-format generation (trained format) |
-| `report` | write | workspace | auto | emits final report + ends turn (`stopTurn`) |
+| `execute_code` | model | kernel, scratch, anvil pool | policy-gated (execpolicy) | persistent IPython; helpers preloaded |
+| `judge_semantic` | harness | DeepSeek API | ask (network) | DeepSeek judge + TP-alt; `judge_control` trust check |
+| `score_finding` | harness | — | auto | custom scorer (port/wrap from Python) |
 
-Gating (codex execpolicy-style, declarative + self-testing):
+Kernel helpers (not tools — Python API inside the execution environment):
+`fork.*`, `slither.*`, `repo.*`, `snapshot/revert` — journaled like tools.
+
+**Executor behind a driver interface** (same pattern as serving-manager):
+`local` driver first — non-root, per-session tmp copy of the repo, hard
+timeouts, network locked to the RPC proxy. `docker` driver deferred until a
+trigger fires: rollout fleet scale, untrusted third-party code, or hermetic
+eval reproducibility.
+
+Gating (codex execpolicy-style, declarative + self-testing) applies at the
+executor chokepoint:
 
 ```starlark
 prefix_rule(pattern=["forge", "test"], decision="allow")
 prefix_rule(pattern=["anvil", "--fork-url"], decision="allow")
 prefix_rule(pattern=["cast", "send", "--private-key"], decision="forbidden")
-prefix_rule(pattern=["*", "curl", "*"], decision="prompt")
+prefix_rule(pattern=["*", "curl", "*"], decision="forbidden")  # network = RPC proxy only
 ```
 
-MCP: `fork_verify`, `slither_scan`, `judge_semantic` are also exposed as **MCP
-servers** so codex/kimi/other clients can call them.
+MCP: the fork-verify helper surface, slither, and `judge_semantic` are also
+exposed as **MCP servers** so codex/kimi/other clients can call them.
 
 ## 7. Model serving & fork layer
 
@@ -201,17 +221,23 @@ findings. Stored under `~/.attis/sessions/<workdir>/<id>/`.
 
 - execpolicy file as in §6, loaded at startup, self-tested.
 - Permission chain (~3 rules to start):
-  auto-approve read-only tools (slither, audit_repo, score) →
-  ask on network/real-RPC (judge, non-fork cast) →
-  deny writes outside the workspace.
-- No sandbox is claimed beyond: anvil isolates exploit execution; the QuickJS
-  cell (Code Mode) has no fs/net.
+  auto-approve read-only kernel helpers (`repo.*`, `slither.scan`, score) →
+  policy-gate `execute_code` at the executor + ask on network/real-RPC
+  (judge, non-fork cast) →
+  deny writes outside the workspace/scratch.
+- No container sandbox in v2: the `local` executor driver runs non-root
+  with a per-session tmp repo copy, hard timeouts, and network locked to
+  the RPC proxy; anvil isolates exploit execution. The `docker` driver is
+  deferred (triggers in §6).
 - Secrets: RPC/DeepSeek keys via env / `.env` (gitignored), never logged.
 
 ## 12. Eval & benchmark
 
 - **Project-level**: ScaBench code benchmark (22 full repos, zero hints,
   no truncation) — the harness's own test-suite for repo-scale audits.
+  Code-mode consequence: this eval is genuinely **agentic** — the kernel +
+  fork substrate are part of the eval path, so it needs an execution pool,
+  not just single-shot generation.
 - **Per-contract**: the 843-example frozen set + DeepSeek judge for iteration.
 - Metric: verified-precision (findings that survive fork verification) vs raw.
 
@@ -221,7 +247,8 @@ findings. Stored under `~/.attis/sessions/<workdir>/<id>/`.
 attis-cli/
 ├── packages/
 │   ├── core/          # agent loop on Pi runtime (step-request orchestrators)
-│   ├── tools/         # slither, fork_verify, judge, score, generate_poc, report
+│   ├── tools/         # execute_code (model-facing), judge, score (harness-side)
+│   ├── kernel/        # persistent IPython kernel + audit helper library + executor drivers
 │   ├── serving/       # vLLM provider adapter
 │   ├── journal/       # wire journal + replay + inspect
 │   ├── rpc/           # JSON-RPC server (LLM-first control)
@@ -229,7 +256,7 @@ attis-cli/
 ├── bin/attis          # CLI entry (TUI default; --output stream-json headless)
 ├── policy/
 │   └── execpolicy.starlark
-├── mcp/               # MCP servers (fork_verify, slither, judge)
+├── mcp/               # MCP servers (fork-verify surface, slither, judge)
 └── docs/
     └── spec.md        # this file
 ```
@@ -249,6 +276,7 @@ attis-cli/
 - **[ANSWERED — spike, 2026-07-29]** Does Pi's provider layer accept a local vLLM `base_url` cleanly? **Yes.** `createProvider({ baseUrl, api: openAICompletionsApi(), auth, models })` + `models.setProvider()` — no closed registry. Gotchas handled in `packages/serving`: keyless servers need a dummy API key; `Model.compat` must pin `maxTokensField: "max_tokens"`, `supportsStore: false`, `supportsReasoningEffort: false` (auto-detect guesses wrong for unknown base URLs).
 - **[ANSWERED — spike]** Qwen3.5 thinking traces: pass-through of `reasoning_content` — **works natively.** pi-ai's openai-completions stream parser maps `reasoning_content`/`reasoning`/`reasoning_text` into `ThinkingContent` + `thinking_start/delta/end` events (verified: 370 thinking deltas in one audit). No adapter needed.
 - **[ANSWERED — spike]** Pi extension points: **package-on-top confirmed.** Custom `AgentTool` registration is array-based (no registry); `beforeToolCall` approval hook blocks with a reason that reaches the model (verified: fork_verify call gated, model adapted). No fork required. Watch: pass `streamFn` explicitly; approval hooks must be re-entrancy-safe under parallel tool execution (we use `sequential`); pin all `@earendil-works/*` deps to the same version.
+- **[ANSWERED — 2026-08]** Model↔tool wire: **native OpenAI function calling, single wire**; the 0/30 smoke is fixed by orgia v8's trace mix, and bootstrap rollouts are teacher-driven (base 9B / deepseek-v4-pro). No marker fallback.
 - **[OPEN]** RPC provider choice (Alchemy default) and its rate limits under fork-verify load.
 - **[OPEN]** TUI framework surface vs headless parity — keep both in lockstep from day one.
 
@@ -262,4 +290,8 @@ attis-cli/
   (3 consecutive / 10-of-50 denials → kill).
 - **nanocodex**: Code Mode (sandboxed exec cell composing tools),
   immutable segmented history + O(1) session forks, tool-output budgeting.
+- **prime-agent**: RLM code-mode shape — persistent IPython kernel with
+  preloaded callables (our audit helper library), native function calling
+  as the only wire, no text-marker fallback discipline; daemon/session
+  supervision as the serving-manager reference.
 - **Pi**: the framework itself (agent runtime, TUI, providers).
