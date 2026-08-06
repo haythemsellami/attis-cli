@@ -300,15 +300,18 @@ def _referenced_std_libs(text):
     return found
 
 
-def _write_remappings(run_dir, dep_paths, forge_std="forge-std"):
+def _write_remappings(run_dir, dep_paths, forge_std="forge-std", canonical=None):
     """Template mode remappings: deps-cache libs + repo/=src/repo/.
 
-    forge_std is the era-picked variant (deps.pick_forge_std): latest
-    prefers the template's own lib/forge-std; legacy always remaps to the
-    deps cache (the template's lib IS latest — unusable below solc
-    0.8.13). When the picked variant is absent from the cache (offline),
-    fall back to whatever forge-std exists and let the verdict carry the
-    compile error with its hint."""
+    forge_std is the era-picked variant (deps.pick_dep): latest prefers
+    the template's own lib/forge-std; legacy always remaps to the deps
+    cache (the template's lib IS latest — unusable below solc 0.8.13).
+    `canonical` maps canonical lib names to the era-picked cache name
+    (e.g. openzeppelin-contracts -> openzeppelin-contracts-legacy). When
+    a picked variant is absent from the cache (offline), fall back to
+    whatever exists and let the verdict carry the compile error with its
+    hint."""
+    canonical = canonical or {}
     template_std = os.path.join(run_dir, "lib", "forge-std", "src")
     lines = []
     if forge_std != "forge-std" and dep_paths.get(forge_std):
@@ -323,13 +326,15 @@ def _write_remappings(run_dir, dep_paths, forge_std="forge-std"):
         lines.append("forge-std/=lib/forge-std/src/")
     elif dep_paths.get("forge-std"):
         lines.append(f"forge-std/={dep_paths['forge-std']}/src/")
-    for name, prefix in (("openzeppelin-contracts", "@openzeppelin/contracts/"),
-                         ("solmate", "solmate/"), ("solady", "solady/")):
-        path = dep_paths.get(name)
+    oz = dep_paths.get(canonical.get("openzeppelin-contracts", "openzeppelin-contracts"))
+    if oz:
+        lines.append(f"@openzeppelin/contracts/={oz}/contracts/")
+    for name, prefix in (("solmate", "solmate/"), ("solady", "solady/")):
+        path = dep_paths.get(canonical.get(name, name))
         if path:
-            subdir = "contracts" if name == "openzeppelin-contracts" else "src"
-            lines.append(f"{prefix}={path}/{subdir}/")
-    upg = dep_paths.get("openzeppelin-contracts-upgradeable")
+            lines.append(f"{prefix}={path}/src/")
+    upg = dep_paths.get(canonical.get("openzeppelin-contracts-upgradeable",
+                                      "openzeppelin-contracts-upgradeable"))
     if upg:
         # Both the package-root form (lib/<name>/... and <name>/... style
         # imports) and the canonical @-style form.
@@ -445,10 +450,10 @@ def _symlink_std_libs(foundry_root, poc_source):
     """Symlink missing standard libs from the deps cache into <root>/lib/.
 
     forge-std always (PoCs import forge-std/Test.sol) — era-picked via
-    deps.pick_forge_std so era-pinned repos get forge-std-legacy, not a
-    latest clone their solc cannot satisfy; the others only when the
-    repo's remappings/config or .sol imports reference them. A lib dir
-    that already exists (vendored, non-stripped) is left untouched.
+    deps.pick_dep so era-pinned repos get legacy variants their solc can
+    satisfy; the others only when the repo's remappings/config or .sol
+    imports reference them (OZ packages era-picked the same way). A lib
+    dir that already exists (vendored, non-stripped) is left untouched.
     """
     deps = _deps()
     texts = [poc_source]
@@ -467,11 +472,13 @@ def _symlink_std_libs(foundry_root, poc_source):
                 except OSError:
                     pass
     # Era detection scans the repo sources, not the PoC (texts[0]).
-    forge_std = deps.pick_forge_std(texts[1:])
-    # (lib/ dir name, deps-cache name) — the legacy variant still lands at
-    # lib/forge-std so the repo's remappings resolve unchanged.
+    lower, upper = deps.repo_solc_bounds(texts[1:])
+    forge_std = deps.pick_dep("forge-std", upper, lower)
+    # (lib/ dir name, deps-cache name) — era variants still land under the
+    # canonical lib/ dir so the repo's remappings resolve unchanged.
     wanted = [("forge-std", forge_std)]
-    wanted += [(n, n) for n in _referenced_std_libs("\n".join(texts))]
+    wanted += [(n, deps.pick_dep(n, upper, lower))
+               for n in _referenced_std_libs("\n".join(texts))]
     paths = deps.ensure([dep for _, dep in wanted])
     linked = []
     lib_dir = os.path.join(foundry_root, "lib")
@@ -545,11 +552,13 @@ def _verify_template_mode(forge, poc_source, setup):
                 except OSError:
                     pass
     wanted = sorted(set(wanted) | set(_referenced_std_libs("\n".join(texts))))
-    forge_std = deps.pick_forge_std(texts)
-    if forge_std not in wanted:
-        wanted.append(forge_std)
-    dep_paths = deps.ensure(wanted) if wanted else {}
-    _write_remappings(run_dir, dep_paths, forge_std)
+    lower, upper = deps.repo_solc_bounds(texts)
+    forge_std = deps.pick_dep("forge-std", upper, lower)
+    # canonical lib name -> era-picked cache name (identity for most).
+    canonical = {n: deps.pick_dep(n, upper, lower) for n in wanted}
+    ensure_names = sorted(set(canonical.values()) | {forge_std})
+    dep_paths = deps.ensure(ensure_names)
+    _write_remappings(run_dir, dep_paths, forge_std, canonical)
     output = _run_forge(forge, "test/Poc.t.sol", run_dir, setup)
     log_path = os.path.join(run_dir, "forge-output.log")
     with open(log_path, "w") as f:

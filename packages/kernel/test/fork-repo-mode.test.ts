@@ -161,6 +161,42 @@ contract PocTest is Test {
 }
 `;
 
+// malt-style fixture (2021): unbounded low pragma + an OZ 3.x-only import
+// path (contracts/math/SafeMath.sol — moved in 4.x, deleted in 5.x).
+const MALT_VAULT = `// SPDX-License-Identifier: MIT
+pragma solidity >=0.6.6;
+import "@openzeppelin/contracts/math/SafeMath.sol";
+contract MaltVault {
+    using SafeMath for uint256;
+    mapping(address => uint256) public balances;
+    function deposit() external payable {
+        balances[msg.sender] = balances[msg.sender].add(msg.value);
+    }
+    function totalOf(address who) external view returns (uint256) {
+        return balances[who];
+    }
+}
+`;
+
+const POC_TEMPLATE_MALT = `// SPDX-License-Identifier: MIT
+// Era-compatible pragma: a PoC importing pre-0.8 contracts must not pin
+// ^0.8.x — the compile graph has to intersect with OZ v3's <0.8.0. On
+// solc <0.8.0, inheriting forge-std's Test also needs abicoder v2.
+pragma solidity >=0.6.6;
+pragma abicoder v2;
+import "forge-std/Test.sol";
+import "repo/src/MaltVault.sol";
+contract PocTest is Test {
+    MaltVault vault;
+    function setUp() public { vault = new MaltVault(); }
+    function test_deposit_lands() public {
+        vm.deal(address(this), 1 ether);
+        vault.deposit{value: 1 ether}();
+        assertEq(vault.totalOf(address(this)), 1 ether);
+    }
+}
+`;
+
 interface Marker {
 	verdict?: string;
 	raw_log_path?: string | null;
@@ -307,6 +343,50 @@ describe.skipIf(!hasPython)("deps cache + foundry-root detection (real python3)"
 		);
 		expect(r.ok).toBe(true);
 		expect(r.result).toBe("True");
+	});
+
+	it("era-variant registry entries are offline-graceful", async () => {
+		const d = JSON.stringify(depsDir);
+		const r = await kernel.exec(
+			"def boom(args, **kw):\n    raise OSError('no network')\n" +
+				"res = deps.ensure(names=['openzeppelin-contracts-legacy', " +
+				"'openzeppelin-contracts-v4', 'openzeppelin-contracts-upgradeable-legacy', " +
+				`'openzeppelin-contracts-upgradeable-v4'], cache_dir=${d}, runner=boom)\n` +
+				"all(v is None for v in res.values())",
+		);
+		expect(r.ok).toBe(true);
+		expect(r.result).toBe("True");
+	});
+
+	it("pick_dep era table: OZ legacy/v4/latest, upgradeable mirrors, forge-std rule kept", async () => {
+		const r = await kernel.exec(
+			"def pick(name, srcs):\n" +
+				"    lo, hi = deps.repo_solc_bounds(srcs)\n" +
+				"    return deps.pick_dep(name, hi, lo)\n" +
+				"(\n" +
+				"    pick('openzeppelin-contracts', ['pragma solidity =0.6.6;']),\n" +
+				"    pick('openzeppelin-contracts', ['pragma solidity >=0.6.6;']),\n" +
+				"    pick('openzeppelin-contracts', ['pragma solidity >=0.6.0 <0.8.0;']),\n" +
+				"    pick('openzeppelin-contracts', ['pragma solidity =0.8.4;']),\n" +
+				"    pick('openzeppelin-contracts', ['pragma solidity ^0.8.0;']),\n" +
+				"    pick('openzeppelin-contracts', ['pragma solidity ^0.8.20;']),\n" +
+				"    pick('openzeppelin-contracts', ['contract NoPragma {}']),\n" +
+				"    pick('openzeppelin-contracts-upgradeable', ['pragma solidity >=0.6.6;']),\n" +
+				"    pick('openzeppelin-contracts-upgradeable', ['pragma solidity =0.8.4;']),\n" +
+				// Wiring passes both bounds: unbounded-but-old-minimum repos
+				// need forge-std-legacy too (their graph can't mix in >=0.8.13).
+				"    pick('forge-std', ['pragma solidity >=0.6.6;']),\n" +
+				"    pick('solmate', ['pragma solidity =0.6.6;']),\n" +
+				")",
+		);
+		expect(r.ok).toBe(true);
+		expect(r.result).toBe(
+			"('openzeppelin-contracts-legacy', 'openzeppelin-contracts-legacy', " +
+				"'openzeppelin-contracts-legacy', 'openzeppelin-contracts-v4', " +
+				"'openzeppelin-contracts', 'openzeppelin-contracts', 'openzeppelin-contracts', " +
+				"'openzeppelin-contracts-upgradeable-legacy', 'openzeppelin-contracts-upgradeable-v4', " +
+				"'forge-std-legacy', 'solmate')",
+		);
 	});
 
 	it("lib detection: remappings (both styles), import prefixes, upgradeable pairing", async () => {
@@ -662,5 +742,53 @@ describe.skipIf(!canIntegrate)("repo-mode lib provisioning (openzeppelin-upgrade
 		}
 		// The PoC dir is cleaned up after the run.
 		await expect(fs.access(path.join(repoDir, "test", "attis_poc"))).rejects.toThrow();
+	}, 320_000);
+});
+
+describe.skipIf(!canIntegrate)("template-mode OZ era selection (v3 legacy, real forge + clone)", () => {
+	let root: string;
+	let depsDir: string;
+	let kernel: Kernel;
+	let legacyReady = false;
+
+	beforeAll(async () => {
+		root = await fs.mkdtemp(path.join(os.tmpdir(), "attis-malt-int-"));
+		const repoDir = path.join(root, "repo");
+		depsDir = path.join(root, "deps");
+		// No foundry.toml — template mode. `>=0.6.6` + the v3-only
+		// math/SafeMath.sol import path: only OZ 3.4.2 satisfies this.
+		await fs.mkdir(path.join(repoDir, "src"), { recursive: true });
+		await fs.writeFile(path.join(repoDir, "src", "MaltVault.sol"), MALT_VAULT);
+		kernel = await makeKernel(
+			repoDir,
+			path.join(root, "scratch"),
+			depsDir,
+			path.join(root, "journal"),
+		);
+		const warm = await kernel.exec(
+			'deps.ensure(["openzeppelin-contracts-legacy"])["openzeppelin-contracts-legacy"] is not None',
+			{ timeoutMs: 300_000 },
+		);
+		legacyReady = warm.result === "True";
+	}, 330_000);
+
+	afterAll(async () => {
+		await kernel.stop();
+		await fs.rm(root, { recursive: true, force: true });
+	});
+
+	it(">=0.6.6 repo importing @openzeppelin/contracts/math/SafeMath.sol reaches a real verdict", async (ctx) => {
+		if (!legacyReady) ctx.skip();
+		const poc = JSON.stringify(POC_TEMPLATE_MALT);
+		const r = await kernel.exec(`fork.verify(${poc})`, { timeoutMs: 300_000 });
+		expect(r.ok).toBe(true);
+		const marker = parseMarker(r.stdout);
+		expect(marker.mode).toBe("template");
+		// The pre-fix failure was an "error" verdict (No such file or
+		// directory for math/SafeMath.sol on OZ 5.x); a real verdict is
+		// the contract.
+		expect(["verified", "reverted"]).toContain(marker.verdict);
+		expect(r.result).toContain("'verified'");
+		await expect(fs.access(path.join(depsDir, "openzeppelin-contracts-legacy"))).resolves.toBeUndefined();
 	}, 320_000);
 });

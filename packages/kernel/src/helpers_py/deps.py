@@ -18,7 +18,10 @@ killing the audit session.
 
 API: ensure(names=None, cache_dir=None, runner=None) -> {name: path|None}
      available(name, cache_dir=None) -> path|None
-     pragma_upper_bound(source) -> ((major, minor, patch), inclusive) | None
+     pragma_upper_bound(source) / pragma_lower_bound(source)
+         -> ((major, minor, patch), inclusive) | None
+     repo_solc_bounds(sources) -> (lower, upper)
+     pick_dep(name, upper_bound, lower_bound=None) -> deps-cache name
      pick_forge_std(sources) -> "forge-std" | "forge-std-legacy"
 """
 import contextlib
@@ -43,11 +46,24 @@ DEPS = {
                          "recurse_submodules": True,
                          "marker": "lib/ds-test/src"},
     "openzeppelin-contracts": {"url": "https://github.com/OpenZeppelin/openzeppelin-contracts"},
+    # Era variants (path layouts differ per major: v3 has contracts/math/,
+    # v4 moved to contracts/utils/math/, v5 deleted SafeMath & co — the
+    # right tag makes old import paths resolve; no path rewriting).
+    "openzeppelin-contracts-legacy": {"url": "https://github.com/OpenZeppelin/openzeppelin-contracts",
+                                      "branch": "v3.4.2"},
+    "openzeppelin-contracts-v4": {"url": "https://github.com/OpenZeppelin/openzeppelin-contracts",
+                                  "branch": "v4.9.6"},
     # Contracts live under contracts/ and the package expects plain
     # openzeppelin-contracts as a sibling (its own foundry setup remaps
     # @openzeppelin/contracts to it) — fork.py provisions both together.
     "openzeppelin-contracts-upgradeable":
         {"url": "https://github.com/OpenZeppelin/openzeppelin-contracts-upgradeable"},
+    "openzeppelin-contracts-upgradeable-legacy":
+        {"url": "https://github.com/OpenZeppelin/openzeppelin-contracts-upgradeable",
+         "branch": "v3.4.2"},
+    "openzeppelin-contracts-upgradeable-v4":
+        {"url": "https://github.com/OpenZeppelin/openzeppelin-contracts-upgradeable",
+         "branch": "v4.9.6"},
     "solmate": {"url": "https://github.com/transmissions11/solmate"},
     "solady": {"url": "https://github.com/Vectorized/solady"},
 }
@@ -152,33 +168,45 @@ def _version(major, minor, patch):
     return (int(major), int(minor or 0), int(patch or 0))
 
 
-def _range_upper(expr):
-    """Upper bound of one pragma range expression, as ((m, n, p), inclusive)
-    or None when unbounded. Styles: =0.8.4 / bare 0.8.4 (exact), ^0.8.0
-    (semver caret), >=0.8.0 <0.9.0 (clauses), >=0.5.0 (no upper)."""
-    best = None
+def _upper_lt(a, b):
+    """(version, inclusive) ordering: tighter (smaller) upper bound wins."""
+    return a[0] < b[0] or (a[0] == b[0] and not a[1] and b[1])
+
+
+def _lower_gt(a, b):
+    """(version, inclusive) ordering: tighter (larger) lower bound wins."""
+    return a[0] > b[0] or (a[0] == b[0] and not a[1] and b[1])
+
+
+def _range_bounds(expr):
+    """(lower, upper) bounds of one pragma range expression, each
+    ((m, n, p), inclusive) or None when unbounded. Styles: =0.8.4 / bare
+    0.8.4 (exact), ^0.8.0 (semver caret), >=0.8.0 <0.9.0 (clauses),
+    >=0.5.0 (no upper)."""
+    lower = upper = None
     for op, major, minor, patch in CLAUSE_RE.findall(expr):
         v = _version(major, minor, patch)
+        lo = hi = None
         if op in ("=", "") or op is None:
-            cand = (v, True)
+            lo = hi = (v, True)
         elif op == "^":
             # ^0.8.0 := >=0.8.0 <0.9.0; ^0.0.x pins the patch (rare in the
             # wild, but semver says <0.1.0).
-            cand = ((0, v[1] + 1, 0), False) if v[0] == 0 else ((v[0] + 1, 0, 0), False)
+            lo = (v, True)
+            hi = ((0, v[1] + 1, 0), False) if v[0] == 0 else ((v[0] + 1, 0, 0), False)
+        elif op == ">=":
+            lo = (v, True)
+        elif op == ">":
+            lo = (v, False)
         elif op == "<":
-            cand = (v, False)
+            hi = (v, False)
         elif op == "<=":
-            cand = (v, True)
-        else:  # >, >= — lower bounds only
-            continue
-        if best is None or _upper_lt(cand, best):
-            best = cand
-    return best
-
-
-def _upper_lt(a, b):
-    """(version, inclusive) ordering: tighter bound wins."""
-    return a[0] < b[0] or (a[0] == b[0] and not a[1] and b[1])
+            hi = (v, True)
+        if lo and (lower is None or _lower_gt(lo, lower)):
+            lower = lo
+        if hi and (upper is None or _upper_lt(hi, upper)):
+            upper = hi
+    return lower, upper
 
 
 def pragma_upper_bound(source):
@@ -186,43 +214,107 @@ def pragma_upper_bound(source):
     or None when no pragma (or no bounded range) is present."""
     best = None
     for m in PRAGMA_RE.finditer(source or ""):
-        ub = _range_upper(m.group(1))
+        ub = _range_bounds(m.group(1))[1]
         if ub and (best is None or _upper_lt(ub, best)):
             best = ub
     return best
 
 
-def pick_forge_std(sources):
-    """Choose the forge-std variant for a repo: "forge-std-legacy" when the
-    repo's max satisfiable solc is below 0.8.13 (latest forge-std's floor),
-    else "forge-std".
+def pragma_lower_bound(source):
+    """Tightest lower solc bound across a source's `pragma solidity` lines,
+    or None when no pragma (or no lower-bounded range) is present."""
+    best = None
+    for m in PRAGMA_RE.finditer(source or ""):
+        lb = _range_bounds(m.group(1))[0]
+        if lb and (best is None or _lower_gt(lb, best)):
+            best = lb
+    return best
 
-    `sources` is an iterable of source strings or .sol file paths (paths
-    are read; unreadable/missing entries are skipped). Files without a
-    pragma carry no bound — with no bounded pragma at all, default to
-    latest (forge picks the newest solc). The tightest bound across files
-    decides, because forge compiles the whole unit with one solc.
 
-    The PoC's own pragma is deliberately NOT part of `sources` — it comes
-    from the model (usually ^0.8.x) and is compatible with either variant.
-    """
-    upper = None
+def _read_sources(sources):
+    """Iterate source texts; entries that are existing files are read."""
     for item in sources or []:
         if not isinstance(item, str):
             continue
-        text = item
         if os.path.isfile(item):
             try:
                 with open(item, errors="replace") as f:
-                    text = f.read()
+                    yield f.read()
             except OSError:
                 continue
+        else:
+            yield item
+
+
+def repo_solc_bounds(sources):
+    """(lower, upper) solc bounds for a repo's sources: the tightest bound
+    of each kind across files (forge compiles the unit with one solc, so
+    any capped file caps the repo). `sources` entries are source strings
+    or .sol file paths; files without a pragma carry no bound.
+
+    The PoC's own pragma is deliberately NOT part of `sources` — it comes
+    from the model (usually ^0.8.x) and is compatible with any variant."""
+    lower = upper = None
+    for text in _read_sources(sources):
+        lb = pragma_lower_bound(text)
+        if lb and (lower is None or _lower_gt(lb, lower)):
+            lower = lb
         ub = pragma_upper_bound(text)
         if ub and (upper is None or _upper_lt(ub, upper)):
             upper = ub
-    if upper is None:
+    return lower, upper
+
+
+def _bound_below(bound, version):
+    """True when the bound caps satisfiable solc strictly below `version`."""
+    v, inclusive = bound
+    return v < version or (v == version and not inclusive)
+
+
+# Era variants for OpenZeppelin: canonical name -> (legacy tag, v4 tag).
+OZ_VARIANTS = {
+    "openzeppelin-contracts": ("openzeppelin-contracts-legacy",
+                               "openzeppelin-contracts-v4"),
+    "openzeppelin-contracts-upgradeable": ("openzeppelin-contracts-upgradeable-legacy",
+                                           "openzeppelin-contracts-upgradeable-v4"),
+}
+
+
+def pick_dep(name, upper_bound, lower_bound=None):
+    """Era-pick the deps-cache variant for a canonical lib name.
+
+    Era bound = the upper bound when bounded, else the declared minimum
+    (a `>=0.6.6` repo was authored against 0.6.x-era packages — its
+    imports only resolve against era-matching tags, and its compile graph
+    cannot mix pre-0.8 deps with deps requiring >=0.8.13).
+
+    forge-std: era < 0.8.13 (latest forge-std's floor) → forge-std-legacy;
+        no bounds at all → latest.
+    openzeppelin-contracts[/ -upgradeable]: era < 0.8.0 → legacy (v3.4.2,
+        ships contracts/math/); [0.8.0, 0.8.20) → v4 (v4.9.6, utils/math/);
+        >= 0.8.20 or no bounds → latest.
+    Anything else (solmate, solady, ...): returned unchanged.
+    """
+    era = upper_bound or lower_bound
+    if name == "forge-std":
+        if era and _bound_below(era, FORGE_STD_LATEST_MIN):
+            return "forge-std-legacy"
         return "forge-std"
-    version, inclusive = upper
-    capped_below = (version < FORGE_STD_LATEST_MIN
-                    or (version == FORGE_STD_LATEST_MIN and not inclusive))
-    return "forge-std-legacy" if capped_below else "forge-std"
+    variants = OZ_VARIANTS.get(name)
+    if variants:
+        if era is None:
+            return name
+        if _bound_below(era, (0, 8, 0)):
+            return variants[0]
+        if _bound_below(era, (0, 8, 20)):
+            return variants[1]
+        return name
+    return name
+
+
+def pick_forge_std(sources):
+    """Choose the forge-std variant for a repo: "forge-std-legacy" when the
+    repo's max satisfiable solc is below 0.8.13 (latest forge-std's floor),
+    else "forge-std". Thin wrapper over repo_solc_bounds + pick_dep —
+    see those for the source/semantics contract."""
+    return pick_dep("forge-std", repo_solc_bounds(sources)[1])
