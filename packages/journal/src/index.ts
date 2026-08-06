@@ -21,6 +21,10 @@ export type JournalEventType =
 	| "fork_verdict"
 	| "finding_kept"
 	| "finding_dropped"
+	| "kernel_exec"
+	| "kernel_restart"
+	| "judge_verdict"
+	| "judge_error"
 	| "report"
 	| "session_end";
 

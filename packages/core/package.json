@@ -11,6 +11,7 @@
     "@earendil-works/pi-agent-core": "0.82.1",
     "@earendil-works/pi-ai": "0.82.1",
     "@attis/fork": "workspace:*",
-    "@attis/journal": "workspace:*"
+    "@attis/journal": "workspace:*",
+    "@attis/kernel": "workspace:*"
   }
 }

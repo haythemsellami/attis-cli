@@ -52,7 +52,7 @@ This repo is open source. The model work is not. The line:
 
 - TypeScript; Pi framework (`earendilworks/pi`) as base — package-on-top,
   **confirmed by the spike** (spec §15); no fork needed.
-- pnpm monorepo per spec §13: `packages/{serving,core}` now, `{tools,journal,rpc,tui}` next.
+- pnpm monorepo per spec §13: `packages/{serving,core,fork,journal,kernel}` now, `{tools,rpc,tui}` next.
 - Pin all `@earendil-works/*` deps to the same version (currently `0.82.1`).
 - Commands:
   - `pnpm install` — install deps

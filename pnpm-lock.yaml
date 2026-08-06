@@ -26,6 +26,9 @@ importers:
       '@attis/journal':
         specifier: workspace:*
         version: link:../journal
+      '@attis/kernel':
+        specifier: workspace:*
+        version: link:../kernel
       '@attis/serving':
         specifier: workspace:*
         version: link:../serving
@@ -39,6 +42,8 @@ importers:
   packages/fork: {}
 
   packages/journal: {}
+
+  packages/kernel: {}
 
   packages/serving:
     dependencies:

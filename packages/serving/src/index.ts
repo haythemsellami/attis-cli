@@ -84,3 +84,26 @@ export function createServingModels(cfg: ServingConfig = servingConfigFromEnv())
 }
 
 export type { Models, Model };
+
+// --- v2 serving-manager (roadmap item 4): drivers + lifecycle manager ---
+export { createServingManager } from "./manager.js";
+export type { ServingManager, ServingManagerOptions } from "./manager.js";
+export {
+	envDriverConfigFromEnv,
+	localDriverConfigFromEnv,
+	runpodDriverConfigFromEnv,
+} from "./config.js";
+export type { EnvDriverConfig, LocalDriverConfig, RunpodDriverConfig } from "./config.js";
+export { createEnvDriver } from "./drivers/env.js";
+export { createLocalDriver } from "./drivers/local.js";
+export type { LocalDriverOptions } from "./drivers/local.js";
+export { createRunpodDriver } from "./drivers/runpod.js";
+export type { RunpodDriver, RunpodDriverOptions } from "./drivers/runpod.js";
+export type { DriverName, ServingDriver, ServingEndpoint } from "./drivers/types.js";
+export type {
+	CommandResult,
+	ExecRunner,
+	ManagedChild,
+	SpawnOptions,
+	SpawnRunner,
+} from "./drivers/runner.js";

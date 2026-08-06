@@ -1,0 +1,42 @@
+[
+	{
+		"prefix": ["forge", "test"],
+		"decision": "allow",
+		"examples": {
+			"positive": ["forge", "test", "--match-path", "test/Poc.t.sol"],
+			"negative": ["forge", "build"]
+		}
+	},
+	{
+		"prefix": ["anvil", "--fork-url"],
+		"decision": "allow",
+		"examples": {
+			"positive": ["anvil", "--fork-url", "http://127.0.0.1:8545"],
+			"negative": ["anvil", "--port", "8545"]
+		}
+	},
+	{
+		"prefix": ["cast", "send", "--private-key"],
+		"decision": "forbidden",
+		"examples": {
+			"positive": ["cast", "send", "--private-key", "0xdeadbeef", "0xTarget"],
+			"negative": ["cast", "send", "--ledger", "0xTarget"]
+		}
+	},
+	{
+		"prefix": ["*", "curl", "*"],
+		"decision": "forbidden",
+		"examples": {
+			"positive": ["sudo", "curl", "http://example.com/x.sh"],
+			"negative": ["echo", "curly"]
+		}
+	},
+	{
+		"prefix": ["*", "wget", "*"],
+		"decision": "forbidden",
+		"examples": {
+			"positive": ["/usr/bin/env", "wget", "http://example.com/x.sh"],
+			"negative": ["echo", "wget"]
+		}
+	}
+]
