@@ -124,6 +124,43 @@ contract PocTest is Test {
 }
 `;
 
+// escher-style fixture: repo-mode (foundry.toml present), contracts import
+// the upgradeable package by its lib/ path and no lib/ is vendored.
+const FOUNDRY_TOML_UPGR = `[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+remappings = ["@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/"]
+`;
+
+const UPGR_VAULT = `// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+import "lib/openzeppelin-contracts-upgradeable/contracts/proxy/utils/Initializable.sol";
+contract UpgradeableVault is Initializable {
+    uint256 public total;
+    function initialize() public initializer { total = 0; }
+    function deposit() external payable { total += msg.value; }
+}
+`;
+
+const POC_REPO_UPGR = `// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+import "forge-std/Test.sol";
+import "../../src/UpgradeableVault.sol";
+contract PocTest is Test {
+    UpgradeableVault vault;
+    function setUp() public {
+        vault = new UpgradeableVault();
+        vault.initialize();
+    }
+    function test_deposit_lands() public {
+        vm.deal(address(this), 1 ether);
+        vault.deposit{value: 1 ether}();
+        assertEq(vault.total(), 1 ether);
+    }
+}
+`;
+
 interface Marker {
 	verdict?: string;
 	raw_log_path?: string | null;
@@ -259,6 +296,70 @@ describe.skipIf(!hasPython)("deps cache + foundry-root detection (real python3)"
 			"('forge-std-legacy', 'forge-std', 'forge-std-legacy', 'forge-std', " +
 				"'forge-std', 'forge-std', 'forge-std', 'forge-std-legacy')",
 		);
+	});
+
+	it("registry addition is offline-graceful", async () => {
+		const d = JSON.stringify(depsDir);
+		const r = await kernel.exec(
+			"def boom(args, **kw):\n    raise OSError('no network')\n" +
+				`res = deps.ensure(names=["openzeppelin-contracts-upgradeable"], cache_dir=${d}, runner=boom)\n` +
+				'res["openzeppelin-contracts-upgradeable"] is None',
+		);
+		expect(r.ok).toBe(true);
+		expect(r.result).toBe("True");
+	});
+
+	it("lib detection: remappings (both styles), import prefixes, upgradeable pairing", async () => {
+		const r = await kernel.exec(
+			"cases = [\n" +
+				"    '@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/',\n" +
+				"    'openzeppelin-contracts-upgradeable/=lib/openzeppelin-contracts-upgradeable/',\n" +
+				'    \'import "openzeppelin-contracts-upgradeable/contracts/proxy/utils/Initializable.sol";\',\n' +
+				'    \'import "lib/openzeppelin-contracts-upgradeable/contracts/token/ERC20/ERC20Upgradeable.sol";\',\n' +
+				'    \'import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";\',\n' +
+				'    \'import "solmate/tokens/ERC20.sol";\',\n' +
+				'    \'import "src/Vault.sol";\',\n' +
+				"]\n" +
+				"[sorted(fork._referenced_std_libs(c)) for c in cases]",
+		);
+		expect(r.ok).toBe(true);
+		const both = "['openzeppelin-contracts', 'openzeppelin-contracts-upgradeable']";
+		expect(r.result).toBe(
+			`[['openzeppelin-contracts'], ${both}, ${both}, ${both}, ${both}, ` +
+				"['solmate'], []]",
+		);
+	});
+
+	it("repo-mode lib provisioning symlinks only absent dirs (hermetic cache)", async () => {
+		// Fake the cache (no network): present dirs satisfy ensure().
+		for (const name of ["openzeppelin-contracts", "openzeppelin-contracts-upgradeable"]) {
+			await fs.mkdir(path.join(depsDir, name), { recursive: true });
+			await fs.writeFile(path.join(depsDir, name, "placeholder"), "x");
+		}
+		// A foundry repo whose imports hit the upgradeable lib path; its
+		// lib/forge-std is vendored (a real dir) and must be left alone.
+		const proj = path.join(root, "prov-repo");
+		await fs.mkdir(path.join(proj, "src"), { recursive: true });
+		await fs.mkdir(path.join(proj, "lib", "forge-std"), { recursive: true });
+		await fs.writeFile(path.join(proj, "lib", "forge-std", "vendored"), "x");
+		await fs.writeFile(path.join(proj, "foundry.toml"), FOUNDRY_TOML_UPGR);
+		await fs.writeFile(path.join(proj, "src", "UpgradeableVault.sol"), UPGR_VAULT);
+
+		const r = await kernel.exec(
+			`linked, _paths = fork._symlink_std_libs(${JSON.stringify(await fs.realpath(proj))}, "")\n` +
+				"sorted(linked)",
+		);
+		expect(r.ok).toBe(true);
+		expect(r.result).toBe("['openzeppelin-contracts', 'openzeppelin-contracts-upgradeable']");
+		const upg = await fs.lstat(path.join(proj, "lib", "openzeppelin-contracts-upgradeable"));
+		expect(upg.isSymbolicLink()).toBe(true);
+		// Pairing: plain OZ is provisioned as the upgradeable sibling.
+		const oz = await fs.lstat(path.join(proj, "lib", "openzeppelin-contracts"));
+		expect(oz.isSymbolicLink()).toBe(true);
+		// Vendored forge-std is untouched.
+		const vendored = await fs.lstat(path.join(proj, "lib", "forge-std"));
+		expect(vendored.isSymbolicLink()).toBe(false);
+		await expect(fs.access(path.join(proj, "lib", "forge-std", "vendored"))).resolves.toBeUndefined();
 	});
 
 	it("find_foundry_root: root-level foundry.toml wins", async () => {
@@ -510,5 +611,56 @@ describe.skipIf(!canIntegrate)("log durability across ExecEnv.cleanup (LocalDriv
 			await env.cleanup().catch(() => {});
 			await fs.rm(root, { recursive: true, force: true });
 		}
+	}, 320_000);
+});
+
+describe.skipIf(!canIntegrate)("repo-mode lib provisioning (openzeppelin-upgradeable, real forge + clone)", () => {
+	let root: string;
+	let repoDir: string;
+	let kernel: Kernel;
+	let depsReady = false;
+
+	beforeAll(async () => {
+		root = await fs.mkdtemp(path.join(os.tmpdir(), "attis-upgr-int-"));
+		repoDir = path.join(root, "repo");
+		await fs.mkdir(path.join(repoDir, "src"), { recursive: true });
+		await fs.writeFile(path.join(repoDir, "foundry.toml"), FOUNDRY_TOML_UPGR);
+		await fs.writeFile(path.join(repoDir, "src", "UpgradeableVault.sol"), UPGR_VAULT);
+		kernel = await makeKernel(
+			repoDir,
+			path.join(root, "scratch"),
+			path.join(root, "deps"),
+			path.join(root, "journal"),
+		);
+		const warm = await kernel.exec(
+			'res = deps.ensure(["openzeppelin-contracts-upgradeable", "openzeppelin-contracts", "forge-std"])\n' +
+				"all(v is not None for v in res.values())",
+			{ timeoutMs: 300_000 },
+		);
+		depsReady = warm.result === "True";
+	}, 330_000);
+
+	afterAll(async () => {
+		await kernel.stop();
+		await fs.rm(root, { recursive: true, force: true });
+	});
+
+	it("lib/-path imports of the upgradeable package reach a real verdict (mode=repo)", async (ctx) => {
+		if (!depsReady) ctx.skip();
+		const poc = JSON.stringify(POC_REPO_UPGR);
+		const r = await kernel.exec(`fork.verify(${poc})`, { timeoutMs: 300_000 });
+		expect(r.ok).toBe(true);
+		const marker = parseMarker(r.stdout);
+		expect(marker.mode).toBe("repo");
+		expect(["verified", "reverted"]).toContain(marker.verdict);
+		expect(r.result).toContain("'verified'");
+
+		// All three libs were symlinked from the cache into the repo copy.
+		for (const name of ["forge-std", "openzeppelin-contracts", "openzeppelin-contracts-upgradeable"]) {
+			const stat = await fs.lstat(path.join(repoDir, "lib", name));
+			expect(stat.isSymbolicLink()).toBe(true);
+		}
+		// The PoC dir is cleaned up after the run.
+		await expect(fs.access(path.join(repoDir, "test", "attis_poc"))).rejects.toThrow();
 	}, 320_000);
 });

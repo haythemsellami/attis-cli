@@ -66,6 +66,8 @@ FOUNDRY_ROOT_MAX_DEPTH = 2
 # remappings/config/imports reference them: dep name -> marker substring.
 STD_LIB_REFS = {
     "openzeppelin-contracts": ("@openzeppelin", "openzeppelin-contracts"),
+    "openzeppelin-contracts-upgradeable": ("@openzeppelin/contracts-upgradeable",
+                                           "openzeppelin-contracts-upgradeable"),
     "solmate": ("solmate",),
     "solady": ("solady",),
 }
@@ -275,9 +277,27 @@ def _stage_repo_sources(run_dir):
 
 
 def _referenced_std_libs(text):
-    """Deps-cache libs the given sources/remappings reference."""
-    return [name for name, markers in STD_LIB_REFS.items()
-            if any(m in text for m in markers)]
+    """Deps-cache libs the given sources/remappings reference.
+
+    Two detection styles: STD_LIB_REFS markers ("@-style" imports like
+    @openzeppelin/contracts/...) and registry-name path prefixes —
+    `lib/<name>/...` (remapping targets and escher-style direct imports)
+    and `<name>/...` import prefixes, matched as the substring `<name>/`
+    against the deps registry. The upgradeable package always pairs with
+    plain openzeppelin-contracts (its foundry setup expects the sibling),
+    so referencing it provisions both.
+    """
+    found = [name for name, markers in STD_LIB_REFS.items()
+             if any(m in text for m in markers)]
+    for name in _deps().DEPS:
+        if name in ("forge-std", "forge-std-legacy") or name in found:
+            continue
+        if f"{name}/" in text:
+            found.append(name)
+    if ("openzeppelin-contracts-upgradeable" in found
+            and "openzeppelin-contracts" not in found):
+        found.append("openzeppelin-contracts")
+    return found
 
 
 def _write_remappings(run_dir, dep_paths, forge_std="forge-std"):
@@ -309,6 +329,12 @@ def _write_remappings(run_dir, dep_paths, forge_std="forge-std"):
         if path:
             subdir = "contracts" if name == "openzeppelin-contracts" else "src"
             lines.append(f"{prefix}={path}/{subdir}/")
+    upg = dep_paths.get("openzeppelin-contracts-upgradeable")
+    if upg:
+        # Both the package-root form (lib/<name>/... and <name>/... style
+        # imports) and the canonical @-style form.
+        lines.append(f"openzeppelin-contracts-upgradeable/={upg}/")
+        lines.append(f"@openzeppelin/contracts-upgradeable/={upg}/contracts/")
     lines.append("repo/=src/repo/")
     with open(os.path.join(run_dir, "remappings.txt"), "w") as f:
         f.write("\n".join(lines) + "\n")

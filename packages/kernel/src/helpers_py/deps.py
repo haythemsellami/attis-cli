@@ -43,6 +43,11 @@ DEPS = {
                          "recurse_submodules": True,
                          "marker": "lib/ds-test/src"},
     "openzeppelin-contracts": {"url": "https://github.com/OpenZeppelin/openzeppelin-contracts"},
+    # Contracts live under contracts/ and the package expects plain
+    # openzeppelin-contracts as a sibling (its own foundry setup remaps
+    # @openzeppelin/contracts to it) — fork.py provisions both together.
+    "openzeppelin-contracts-upgradeable":
+        {"url": "https://github.com/OpenZeppelin/openzeppelin-contracts-upgradeable"},
     "solmate": {"url": "https://github.com/transmissions11/solmate"},
     "solady": {"url": "https://github.com/Vectorized/solady"},
 }
