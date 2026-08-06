@@ -98,6 +98,32 @@ contract PocTest is Test {
 }
 `;
 
+// Era-pinned fixture (2021-2022 style): `=0.8.4` cannot compile against
+// latest forge-std (requires >=0.8.13) — needs the legacy variant.
+const LEGACY_VAULT = `// SPDX-License-Identifier: MIT
+pragma solidity =0.8.4;
+contract LegacyVault {
+    mapping(address => uint256) public balances;
+    function deposit() external payable { balances[msg.sender] += msg.value; }
+    function total() external view returns (uint256) { return address(this).balance; }
+}
+`;
+
+const POC_TEMPLATE_LEGACY = `// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+import "forge-std/Test.sol";
+import "repo/src/LegacyVault.sol";
+contract PocTest is Test {
+    LegacyVault vault;
+    function setUp() public { vault = new LegacyVault(); }
+    function test_deposit_lands() public {
+        vm.deal(address(this), 1 ether);
+        vault.deposit{value: 1 ether}();
+        assertEq(vault.total(), 1 ether);
+    }
+}
+`;
+
 interface Marker {
 	verdict?: string;
 	raw_log_path?: string | null;
@@ -191,6 +217,48 @@ describe.skipIf(!hasPython)("deps cache + foundry-root detection (real python3)"
 		);
 		expect(r.ok).toBe(true);
 		expect(r.result).toBe("'ValueError'");
+	});
+
+	it("pragma_upper_bound parses every pragma style", async () => {
+		const r = await kernel.exec(
+			"(\n" +
+				"    deps.pragma_upper_bound('pragma solidity =0.8.4;'),\n" +
+				"    deps.pragma_upper_bound('pragma solidity >=0.8.0 <0.9.0;'),\n" +
+				"    deps.pragma_upper_bound('pragma solidity ^0.8.0;'),\n" +
+				"    deps.pragma_upper_bound('pragma solidity >=0.5.0;'),\n" +
+				"    deps.pragma_upper_bound('pragma solidity 0.8.4;'),\n" +
+				"    deps.pragma_upper_bound('pragma solidity <=0.8.12;'),\n" +
+				"    deps.pragma_upper_bound('contract NoPragma {}'),\n" +
+				")",
+		);
+		expect(r.ok).toBe(true);
+		expect(r.result).toBe(
+			"(((0, 8, 4), True), ((0, 9, 0), False), ((0, 9, 0), False), None, " +
+				"((0, 8, 4), True), ((0, 8, 12), True), None)",
+		);
+	});
+
+	it("pick_forge_std picks the era from the repo's max satisfiable solc", async () => {
+		// A path input: =0.8.4 pinned file on disk.
+		const pinned = path.join(root, "era-pinned.sol");
+		await fs.writeFile(pinned, "pragma solidity =0.8.4;\ncontract Pinned {}\n");
+		const r = await kernel.exec(
+			"(\n" +
+				"    deps.pick_forge_std(['pragma solidity =0.8.4;\\ncontract V{}']),\n" +
+				"    deps.pick_forge_std(['pragma solidity ^0.8.20;\\ncontract V{}']),\n" +
+				"    deps.pick_forge_std(['pragma solidity ^0.8.0;', 'pragma solidity =0.8.4;']),\n" +
+				"    deps.pick_forge_std(['pragma solidity >=0.8.0 <0.9.0;']),\n" +
+				"    deps.pick_forge_std(['pragma solidity >=0.5.0;']),\n" +
+				"    deps.pick_forge_std(['// no pragma at all']),\n" +
+				"    deps.pick_forge_std([]),\n" +
+				`    deps.pick_forge_std([${JSON.stringify(pinned)}]),\n` +
+				")",
+		);
+		expect(r.ok).toBe(true);
+		expect(r.result).toBe(
+			"('forge-std-legacy', 'forge-std', 'forge-std-legacy', 'forge-std', " +
+				"'forge-std', 'forge-std', 'forge-std', 'forge-std-legacy')",
+		);
 	});
 
 	it("find_foundry_root: root-level foundry.toml wins", async () => {
@@ -362,6 +430,54 @@ describe.skipIf(!canIntegrate)("template-mode fork.verify with repo sources stag
 		expect(r.result).toContain("'error'");
 		expect(r.result).toContain("missing_import");
 		expect(r.result).toContain("nonexistent/Thing.sol");
+	}, 320_000);
+});
+
+describe.skipIf(!canIntegrate)("template-mode era selection (forge-std-legacy, real forge + clone)", () => {
+	let root: string;
+	let depsDir: string;
+	let kernel: Kernel;
+	let legacyReady = false;
+
+	beforeAll(async () => {
+		root = await fs.mkdtemp(path.join(os.tmpdir(), "attis-legacy-int-"));
+		const repoDir = path.join(root, "repo");
+		depsDir = path.join(root, "deps");
+		// No foundry.toml — template mode. `=0.8.4` pins the whole compile
+		// unit below latest forge-std's 0.8.13 floor.
+		await fs.mkdir(path.join(repoDir, "src"), { recursive: true });
+		await fs.writeFile(path.join(repoDir, "src", "LegacyVault.sol"), LEGACY_VAULT);
+		kernel = await makeKernel(
+			repoDir,
+			path.join(root, "scratch"),
+			depsDir,
+			path.join(root, "journal"),
+		);
+		const warm = await kernel.exec(
+			'deps.ensure(["forge-std-legacy"])["forge-std-legacy"] is not None',
+			{ timeoutMs: 300_000 },
+		);
+		legacyReady = warm.result === "True";
+	}, 330_000);
+
+	afterAll(async () => {
+		await kernel.stop();
+		await fs.rm(root, { recursive: true, force: true });
+	});
+
+	it("=0.8.4-pinned repo reaches a real verdict, not a pragma-conflict error", async (ctx) => {
+		if (!legacyReady) ctx.skip();
+		const poc = JSON.stringify(POC_TEMPLATE_LEGACY);
+		const r = await kernel.exec(`fork.verify(${poc})`, { timeoutMs: 300_000 });
+		expect(r.ok).toBe(true);
+		const marker = parseMarker(r.stdout);
+		expect(marker.mode).toBe("template");
+		// The pre-fix failure was an "error" verdict from the pragma
+		// conflict; a real verdict (verified or reverted) is the contract.
+		expect(["verified", "reverted"]).toContain(marker.verdict);
+		expect(r.result).toContain("'verified'");
+		// The legacy variant really was provisioned in the deps cache.
+		await expect(fs.access(path.join(depsDir, "forge-std-legacy"))).resolves.toBeUndefined();
 	}, 320_000);
 });
 

@@ -5,6 +5,12 @@ arrive without lib/forge-std & co. This cache (~/.attis/deps/<name>) holds
 one shallow clone per well-known library; fork.verify symlinks/remaps them
 into the session workspace instead of cloning per session.
 
+Era-aware: forge-std exists in two variants — `forge-std` (latest,
+requires solc >=0.8.13) and `forge-std-legacy` (v1.5.6 tag, pragma
+>=0.6.2 <0.9.0) for 2021-2022 repos whose pinned pragmas no modern solc
+can satisfy alongside latest forge-std. pick_forge_std() scans the repo's
+pragma ranges and chooses.
+
 Stdlib only; git via subprocess (trusted helper code). ensure() is
 offline-graceful: a failed clone never raises — the dep is simply reported
 as None so the caller can degrade (error verdict with a hint) instead of
@@ -12,21 +18,40 @@ killing the audit session.
 
 API: ensure(names=None, cache_dir=None, runner=None) -> {name: path|None}
      available(name, cache_dir=None) -> path|None
+     pragma_upper_bound(source) -> ((major, minor, patch), inclusive) | None
+     pick_forge_std(sources) -> "forge-std" | "forge-std-legacy"
 """
 import contextlib
 import os
+import re
 import shutil
 import subprocess
 
 CTX = None
 
-# name -> clone url. The name is also the lib/ dir forge expects.
+# name -> {"url", "branch"?}. The name is also the lib/ dir forge expects
+# (forge-std-legacy is never lib-linked under its own name — fork.py links
+# it as lib/forge-std when era detection picks it).
 DEPS = {
-    "forge-std": "https://github.com/foundry-rs/forge-std",
-    "openzeppelin-contracts": "https://github.com/OpenZeppelin/openzeppelin-contracts",
-    "solmate": "https://github.com/transmissions11/solmate",
-    "solady": "https://github.com/Vectorized/solady",
+    "forge-std": {"url": "https://github.com/foundry-rs/forge-std"},
+    # v1.5.6: last release whose pragma (>=0.6.2 <0.9.0) pre-0.8.13 repos
+    # can satisfy. Latest master requires >=0.8.13. Its Test.sol imports
+    # ds-test (its only submodule), so the clone must recurse — and the
+    # marker lets a stale submodule-less copy be re-cloned.
+    "forge-std-legacy": {"url": "https://github.com/foundry-rs/forge-std",
+                         "branch": "v1.5.6",
+                         "recurse_submodules": True,
+                         "marker": "lib/ds-test/src"},
+    "openzeppelin-contracts": {"url": "https://github.com/OpenZeppelin/openzeppelin-contracts"},
+    "solmate": {"url": "https://github.com/transmissions11/solmate"},
+    "solady": {"url": "https://github.com/Vectorized/solady"},
 }
+
+# Latest forge-std requires solc >= 0.8.13 — repos capped below get legacy.
+FORGE_STD_LATEST_MIN = (0, 8, 13)
+
+PRAGMA_RE = re.compile(r"pragma\s+solidity\s+([^;]+);")
+CLAUSE_RE = re.compile(r"(<=|>=|<|>|=|\^)?\s*(\d+)(?:\.(\d+))?(?:\.(\d+))?")
 
 
 def configure(ctx):
@@ -84,25 +109,115 @@ def ensure(names=None, cache_dir=None, runner=None, timeout_s=180):
     result = {}
     with _file_lock(cache):
         for name in names:
-            url = DEPS.get(name)
-            if url is None:
+            dep = DEPS.get(name)
+            if dep is None:
                 raise ValueError(f"unknown dep: {name!r} (known: {sorted(DEPS)})")
             dest = os.path.join(cache, name)
-            if _present(dest):
+            marker = dep.get("marker")
+            if _present(dest) and (not marker or os.path.exists(os.path.join(dest, marker))):
                 result[name] = dest
                 continue
+            # Absent, or stale (marker missing — e.g. cloned before the dep
+            # grew submodules): re-clone from scratch.
+            shutil.rmtree(dest, ignore_errors=True)
             staging = dest + ".staging"
             shutil.rmtree(staging, ignore_errors=True)
+            args = ["git", "clone", "--depth", "1"]
+            if dep.get("branch"):
+                args += ["--branch", dep["branch"]]
+            if dep.get("recurse_submodules"):
+                args += ["--recurse-submodules", "--shallow-submodules"]
+            args += [dep["url"], staging]
             try:
-                proc = runner(["git", "clone", "--depth", "1", url, staging],
-                              capture_output=True, text=True, timeout=timeout_s)
+                proc = runner(args, capture_output=True, text=True, timeout=timeout_s)
                 ok = getattr(proc, "returncode", 1) == 0
             except Exception:
                 ok = False
-            if ok and _present(staging):
+            if ok and _present(staging) and (
+                    not marker or os.path.exists(os.path.join(staging, marker))):
                 os.replace(staging, dest)
                 result[name] = dest
             else:
                 shutil.rmtree(staging, ignore_errors=True)
                 result[name] = None
     return result
+
+
+def _version(major, minor, patch):
+    return (int(major), int(minor or 0), int(patch or 0))
+
+
+def _range_upper(expr):
+    """Upper bound of one pragma range expression, as ((m, n, p), inclusive)
+    or None when unbounded. Styles: =0.8.4 / bare 0.8.4 (exact), ^0.8.0
+    (semver caret), >=0.8.0 <0.9.0 (clauses), >=0.5.0 (no upper)."""
+    best = None
+    for op, major, minor, patch in CLAUSE_RE.findall(expr):
+        v = _version(major, minor, patch)
+        if op in ("=", "") or op is None:
+            cand = (v, True)
+        elif op == "^":
+            # ^0.8.0 := >=0.8.0 <0.9.0; ^0.0.x pins the patch (rare in the
+            # wild, but semver says <0.1.0).
+            cand = ((0, v[1] + 1, 0), False) if v[0] == 0 else ((v[0] + 1, 0, 0), False)
+        elif op == "<":
+            cand = (v, False)
+        elif op == "<=":
+            cand = (v, True)
+        else:  # >, >= — lower bounds only
+            continue
+        if best is None or _upper_lt(cand, best):
+            best = cand
+    return best
+
+
+def _upper_lt(a, b):
+    """(version, inclusive) ordering: tighter bound wins."""
+    return a[0] < b[0] or (a[0] == b[0] and not a[1] and b[1])
+
+
+def pragma_upper_bound(source):
+    """Tightest upper solc bound across a source's `pragma solidity` lines,
+    or None when no pragma (or no bounded range) is present."""
+    best = None
+    for m in PRAGMA_RE.finditer(source or ""):
+        ub = _range_upper(m.group(1))
+        if ub and (best is None or _upper_lt(ub, best)):
+            best = ub
+    return best
+
+
+def pick_forge_std(sources):
+    """Choose the forge-std variant for a repo: "forge-std-legacy" when the
+    repo's max satisfiable solc is below 0.8.13 (latest forge-std's floor),
+    else "forge-std".
+
+    `sources` is an iterable of source strings or .sol file paths (paths
+    are read; unreadable/missing entries are skipped). Files without a
+    pragma carry no bound — with no bounded pragma at all, default to
+    latest (forge picks the newest solc). The tightest bound across files
+    decides, because forge compiles the whole unit with one solc.
+
+    The PoC's own pragma is deliberately NOT part of `sources` — it comes
+    from the model (usually ^0.8.x) and is compatible with either variant.
+    """
+    upper = None
+    for item in sources or []:
+        if not isinstance(item, str):
+            continue
+        text = item
+        if os.path.isfile(item):
+            try:
+                with open(item, errors="replace") as f:
+                    text = f.read()
+            except OSError:
+                continue
+        ub = pragma_upper_bound(text)
+        if ub and (upper is None or _upper_lt(ub, upper)):
+            upper = ub
+    if upper is None:
+        return "forge-std"
+    version, inclusive = upper
+    capped_below = (version < FORGE_STD_LATEST_MIN
+                    or (version == FORGE_STD_LATEST_MIN and not inclusive))
+    return "forge-std-legacy" if capped_below else "forge-std"

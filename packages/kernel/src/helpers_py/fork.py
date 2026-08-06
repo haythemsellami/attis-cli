@@ -9,7 +9,9 @@ workspace.ts / runner.ts) so the two layers stay interchangeable:
     created once and reused
   - standard libraries (forge-std, openzeppelin-contracts, solmate, solady)
     come from the shared deps cache (deps.py, ~/.attis/deps) — GitHub
-    tarballs strip submodules, so audited repos never ship lib/
+    tarballs strip submodules, so audited repos never ship lib/. forge-std
+    is era-picked: repos whose pragmas cap solc below 0.8.13 get the
+    forge-std-legacy variant (v1.5.6) instead of latest
 
 verify() picks a mode per call:
 
@@ -278,11 +280,26 @@ def _referenced_std_libs(text):
             if any(m in text for m in markers)]
 
 
-def _write_remappings(run_dir, dep_paths):
-    """Template mode remappings: deps-cache libs + repo/=src/repo/."""
+def _write_remappings(run_dir, dep_paths, forge_std="forge-std"):
+    """Template mode remappings: deps-cache libs + repo/=src/repo/.
+
+    forge_std is the era-picked variant (deps.pick_forge_std): latest
+    prefers the template's own lib/forge-std; legacy always remaps to the
+    deps cache (the template's lib IS latest — unusable below solc
+    0.8.13). When the picked variant is absent from the cache (offline),
+    fall back to whatever forge-std exists and let the verdict carry the
+    compile error with its hint."""
     template_std = os.path.join(run_dir, "lib", "forge-std", "src")
     lines = []
-    if os.path.isdir(template_std):
+    if forge_std != "forge-std" and dep_paths.get(forge_std):
+        lines.append(f"forge-std/={dep_paths[forge_std]}/src/")
+        # v1.5.6's Test.sol imports ds-test (submodule living inside the
+        # forge-std clone) — the cache is outside lib/, so forge's lib/
+        # auto-detection can't see it; remap explicitly.
+        ds_test = os.path.join(dep_paths[forge_std], "lib", "ds-test", "src")
+        if os.path.isdir(ds_test):
+            lines.append(f"ds-test/={ds_test}/")
+    elif os.path.isdir(template_std):
         lines.append("forge-std/=lib/forge-std/src/")
     elif dep_paths.get("forge-std"):
         lines.append(f"forge-std/={dep_paths['forge-std']}/src/")
@@ -401,8 +418,10 @@ def _resolve_foundry_override(setup):
 def _symlink_std_libs(foundry_root, poc_source):
     """Symlink missing standard libs from the deps cache into <root>/lib/.
 
-    forge-std always (PoCs import forge-std/Test.sol); the others only when
-    the repo's remappings/config or .sol imports reference them. A lib dir
+    forge-std always (PoCs import forge-std/Test.sol) — era-picked via
+    deps.pick_forge_std so era-pinned repos get forge-std-legacy, not a
+    latest clone their solc cannot satisfy; the others only when the
+    repo's remappings/config or .sol imports reference them. A lib dir
     that already exists (vendored, non-stripped) is left untouched.
     """
     deps = _deps()
@@ -421,17 +440,32 @@ def _symlink_std_libs(foundry_root, poc_source):
                         texts.append(f.read())
                 except OSError:
                     pass
-    wanted = ["forge-std"] + _referenced_std_libs("\n".join(texts))
-    paths = deps.ensure(wanted)
+    # Era detection scans the repo sources, not the PoC (texts[0]).
+    forge_std = deps.pick_forge_std(texts[1:])
+    # (lib/ dir name, deps-cache name) — the legacy variant still lands at
+    # lib/forge-std so the repo's remappings resolve unchanged.
+    wanted = [("forge-std", forge_std)]
+    wanted += [(n, n) for n in _referenced_std_libs("\n".join(texts))]
+    paths = deps.ensure([dep for _, dep in wanted])
     linked = []
     lib_dir = os.path.join(foundry_root, "lib")
-    for name in wanted:
-        dest = os.path.join(lib_dir, name)
-        if os.path.lexists(dest) or not paths.get(name):
+    for lib_name, dep_name in wanted:
+        dest = os.path.join(lib_dir, lib_name)
+        if os.path.lexists(dest) or not paths.get(dep_name):
             continue
         os.makedirs(lib_dir, exist_ok=True)
-        os.symlink(paths[name], dest)
-        linked.append(name)
+        os.symlink(paths[dep_name], dest)
+        linked.append(lib_name)
+    # forge-std v1.5.6 imports ds-test from its own lib/ submodule; expose
+    # it at lib/ds-test too, where forge's auto-detection definitely looks.
+    legacy = paths.get("forge-std-legacy")
+    if forge_std == "forge-std-legacy" and legacy:
+        ds_test = os.path.join(legacy, "lib", "ds-test")
+        dest = os.path.join(lib_dir, "ds-test")
+        if os.path.isdir(ds_test) and not os.path.lexists(dest):
+            os.makedirs(lib_dir, exist_ok=True)
+            os.symlink(ds_test, dest)
+            linked.append("ds-test")
     return linked, paths
 
 
@@ -468,7 +502,8 @@ def _verify_repo_mode(forge, poc_source, setup, foundry_root):
 
 def _verify_template_mode(forge, poc_source, setup):
     """Bare template workspace + the repo's .sol tree staged under
-    src/repo/ + remappings into the deps cache."""
+    src/repo/ + remappings into the deps cache. forge-std is era-picked
+    from the staged sources (pre-0.8.13 repos get forge-std-legacy)."""
     run_dir = _materialize(poc_source, setup.get("files"))
     _stage_repo_sources(run_dir)
     deps = _deps()
@@ -484,8 +519,11 @@ def _verify_template_mode(forge, poc_source, setup):
                 except OSError:
                     pass
     wanted = sorted(set(wanted) | set(_referenced_std_libs("\n".join(texts))))
+    forge_std = deps.pick_forge_std(texts)
+    if forge_std not in wanted:
+        wanted.append(forge_std)
     dep_paths = deps.ensure(wanted) if wanted else {}
-    _write_remappings(run_dir, dep_paths)
+    _write_remappings(run_dir, dep_paths, forge_std)
     output = _run_forge(forge, "test/Poc.t.sol", run_dir, setup)
     log_path = os.path.join(run_dir, "forge-output.log")
     with open(log_path, "w") as f:
