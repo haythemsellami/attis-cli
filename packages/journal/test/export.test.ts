@@ -559,6 +559,28 @@ describe("kernel fork.verify markers (repo-mode ground truth)", () => {
 		expect(rows[0].metadata.label).toBe("hard_negative");
 	});
 
+	it("treats the marker's additive mode field as opaque", async () => {
+		// fork.verify gained "mode" ("repo"|"template"); the exporter reads
+		// only verdict/raw_log_path and must keep labeling as before.
+		const ev = stamper();
+		const eventsPath = await writeSession(root, "marker-mode", [
+			ev("session_start", { workdir: "/repos/v" }),
+			ev("audit_prompt", { chars: 10, prompt: "p", system: "s" }),
+			ev(
+				"kernel_exec",
+				kernelExec("fork.verify(poc)", {
+					stdout: 'ATTIS_FORK_VERDICT {"verdict": "verified", "raw_log_path": "/x", "mode": "repo"}\n',
+				}),
+			),
+			ev("audit_result", { output_chars: 10, output: "analysis" }),
+			ev("session_end", {}),
+		]);
+		const { rows, dropped, warnings } = await exportSession(eventsPath);
+		expect(dropped).toBe(0);
+		expect(rows[0].metadata.label).toBe("gold_positive");
+		expect(warnings.some((w) => w.includes("malformed ATTIS_FORK_VERDICT"))).toBe(false);
+	});
+
 	it("ignores malformed markers and stays unlabeled", async () => {
 		const ev = stamper();
 		const eventsPath = await writeSession(root, "marker-bad", [

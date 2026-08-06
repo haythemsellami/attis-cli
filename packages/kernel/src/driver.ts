@@ -17,6 +17,11 @@ export interface ExecSession {
 	id: string;
 	/** The mounted repo being audited (read-only source of truth). */
 	repoRoot: string;
+	/**
+	 * Journal session dir for durable evidence (fork.verify raw logs are
+	 * copied here as ATTIS_JOURNAL_DIR). Omit to keep scratch-only logs.
+	 */
+	journalDir?: string;
 }
 
 export interface ExecEnv {
@@ -39,6 +44,8 @@ const ENV_ALLOW_EXACT = new Set([
 	"PATH", "HOME", "USER", "LOGNAME", "SHELL",
 	"LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "TEMP", "TMP", "TERM",
 	"XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
+	// attis path config (not secrets): evidence dir + deps cache override.
+	"ATTIS_JOURNAL_DIR", "ATTIS_DEPS_DIR",
 ]);
 
 /**
@@ -68,7 +75,9 @@ export function scrubEnv(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 /**
  * ulimit wrapper for the sidecar, where portable (POSIX only): cap user
  * processes against fork bombs. File-size/address-space limits are left
- * alone — python and forge need generous headroom.
+ * alone — python and forge need generous headroom. 4096 (not 512): the cap
+ * must clear the host's own process count — 512 broke sidecar boot on any
+ * machine already running >~500 user processes (suite-parallel flake).
  */
 export function ulimitPrefix(): string[] {
 	if (process.platform === "win32") return [];
@@ -101,6 +110,8 @@ export class LocalDriver implements ExecutorDriver {
 				timeoutMs: this.opts.timeoutMs,
 				pythonPath: this.opts.pythonPath,
 				env: scrubEnv(process.env),
+				// Durable evidence dir — survives the session tmp cleanup.
+				...(session.journalDir ? { journalDir: session.journalDir } : {}),
 				execPrefix: ulimitPrefix(),
 				onRestart: this.opts.onRestart,
 			});
