@@ -72,6 +72,21 @@ STD_LIB_REFS = {
     "solady": ("solady",),
 }
 
+# Canonical remapping each provisioned lib needs for its INTERNAL imports
+# (e.g. openzeppelin-contracts-upgradeable's sources import
+# @openzeppelin/contracts/...) — repos with their own prefix style
+# (openzeppelin-upgradeable/=lib/...) don't cover these. Lib dir names are
+# canonical: our symlinks land at lib/<name> even for era-variant picks.
+CANONICAL_REMAPPINGS = {
+    "forge-std": "forge-std/=lib/forge-std/src/",
+    "openzeppelin-contracts":
+        "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
+    "openzeppelin-contracts-upgradeable":
+        "@openzeppelin/contracts-upgradeable/=lib/openzeppelin-contracts-upgradeable/contracts/",
+    "solmate": "solmate/=lib/solmate/src/",
+    "solady": "solady/=lib/solady/src/",
+}
+
 
 def configure(ctx):
     global CTX
@@ -446,6 +461,60 @@ def _resolve_foundry_override(setup):
     return full
 
 
+def _remapping_prefixes(foundry_root):
+    """Prefixes the repo already remaps, from remappings.txt AND
+    foundry.toml (foundry merges both; a prefix mapped in either covers).
+    Coverage is exact-prefix: `openzeppelin/` does NOT cover
+    `@openzeppelin/contracts/`."""
+    prefixes = set()
+    path = os.path.join(foundry_root, "remappings.txt")
+    if os.path.isfile(path):
+        with open(path, errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    prefixes.add(line.split("=", 1)[0].strip())
+    toml = os.path.join(foundry_root, "foundry.toml")
+    if os.path.isfile(toml):
+        with open(toml, errors="replace") as f:
+            content = f.read()
+        # remappings live as quoted "prefix=target" strings in the toml.
+        for m in re.finditer(r"""["']([^"']+=[^"']+)["']""", content):
+            prefixes.add(m.group(1).split("=", 1)[0].strip())
+    return prefixes
+
+
+def _ensure_canonical_remappings(foundry_root, lib_names):
+    """Append the canonical remapping lines for provisioned libs to the
+    repo COPY's remappings.txt (created when absent — foundry merges it
+    with foundry.toml remappings). Skips prefixes the repo already maps
+    (the repo's own target wins) and lines already appended by an earlier
+    verify call in this session. Returns the lines appended."""
+    prefixes = _remapping_prefixes(foundry_root)
+    lines = []
+    for name in lib_names:
+        line = CANONICAL_REMAPPINGS.get(name)
+        if not line:
+            continue
+        prefix = line.split("=", 1)[0]
+        if prefix in prefixes:
+            continue
+        prefixes.add(prefix)
+        lines.append(line)
+    if not lines:
+        return []
+    path = os.path.join(foundry_root, "remappings.txt")
+    with open(path, "a+") as f:
+        f.seek(0)  # a+ starts at EOF; reads need the head
+        # NB: no header comment — foundry's remappings.txt parser rejects
+        # anything that isn't <key>=<value>.
+        existing = f.read()
+        if existing and not existing.endswith("\n"):
+            f.write("\n")
+        f.write("\n".join(lines) + "\n")
+    return lines
+
+
 def _symlink_std_libs(foundry_root, poc_source):
     """Symlink missing standard libs from the deps cache into <root>/lib/.
 
@@ -454,6 +523,9 @@ def _symlink_std_libs(foundry_root, poc_source):
     satisfy; the others only when the repo's remappings/config or .sol
     imports reference them (OZ packages era-picked the same way). A lib
     dir that already exists (vendored, non-stripped) is left untouched.
+    Afterwards, canonical @-style remappings the libs' internal imports
+    need are appended to the copy's remappings.txt (only prefixes the
+    repo doesn't already map).
     """
     deps = _deps()
     texts = [poc_source]
@@ -499,6 +571,13 @@ def _symlink_std_libs(foundry_root, poc_source):
             os.makedirs(lib_dir, exist_ok=True)
             os.symlink(ds_test, dest)
             linked.append("ds-test")
+    # The libs' internal imports use canonical @-style prefixes the repo's
+    # own remappings may not cover (escher: openzeppelin-upgradeable/=...
+    # but the package imports @openzeppelin/contracts/...). Append the
+    # canonical lines for every lib now present (provisioned or vendored).
+    present = [lib_name for lib_name, _ in wanted
+               if os.path.lexists(os.path.join(lib_dir, lib_name))]
+    _ensure_canonical_remappings(foundry_root, present)
     return linked, paths
 
 

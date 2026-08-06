@@ -197,6 +197,42 @@ contract PocTest is Test {
 }
 `;
 
+// escher-style fixture (repo-mode): the repo's remappings.txt uses its own
+// prefix style, so the canonical @openzeppelin/contracts/ prefix the
+// upgradeable package's internal imports need has NO covering remapping.
+const ESCHER_REMAPPINGS = `openzeppelin-upgradeable/=lib/openzeppelin-contracts-upgradeable/contracts/
+openzeppelin/=lib/openzeppelin-contracts/
+`;
+
+const ESCHER_VAULT = `// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+import "openzeppelin-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts/utils/Context.sol";
+contract EscherVault is Initializable, Context {
+    uint256 public total;
+    function initialize() public initializer { total = 0; }
+    function deposit() external payable { total += msg.value; }
+}
+`;
+
+const POC_REPO_ESCHER = `// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+import "forge-std/Test.sol";
+import "../../src/EscherVault.sol";
+contract PocTest is Test {
+    EscherVault vault;
+    function setUp() public {
+        vault = new EscherVault();
+        vault.initialize();
+    }
+    function test_deposit_lands() public {
+        vm.deal(address(this), 1 ether);
+        vault.deposit{value: 1 ether}();
+        assertEq(vault.total(), 1 ether);
+    }
+}
+`;
+
 interface Marker {
 	verdict?: string;
 	raw_log_path?: string | null;
@@ -440,6 +476,79 @@ describe.skipIf(!hasPython)("deps cache + foundry-root detection (real python3)"
 		const vendored = await fs.lstat(path.join(proj, "lib", "forge-std"));
 		expect(vendored.isSymbolicLink()).toBe(false);
 		await expect(fs.access(path.join(proj, "lib", "forge-std", "vendored"))).resolves.toBeUndefined();
+	});
+
+	it("canonical remappings: existing prefix wins, foreign prefix doesn't cover, create + dedup", async () => {
+		// A: repo already maps the canonical prefix (its own target wins).
+		const a = path.join(root, "remap-a");
+		await fs.mkdir(a, { recursive: true });
+		await fs.writeFile(
+			path.join(a, "remappings.txt"),
+			"@openzeppelin/contracts/=node_modules/@openzeppelin/contracts/\n",
+		);
+		// B: only a foreign prefix — does NOT cover @openzeppelin/contracts/.
+		const b = path.join(root, "remap-b");
+		await fs.mkdir(b, { recursive: true });
+		await fs.writeFile(path.join(b, "remappings.txt"), "openzeppelin/=lib/openzeppelin-contracts/\n");
+		// C: no remappings.txt at all.
+		const c = path.join(root, "remap-c");
+		await fs.mkdir(c, { recursive: true });
+		// D: coverage via foundry.toml remappings.
+		const d = path.join(root, "remap-d");
+		await fs.mkdir(d, { recursive: true });
+		await fs.writeFile(
+			path.join(d, "foundry.toml"),
+			'[profile.default]\nremappings = ["@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/"]\n',
+		);
+		const r = await kernel.exec(
+			"(\n" +
+				`    fork._ensure_canonical_remappings(${JSON.stringify(await fs.realpath(a))}, ['openzeppelin-contracts']),\n` +
+				`    fork._ensure_canonical_remappings(${JSON.stringify(await fs.realpath(b))}, ['openzeppelin-contracts']),\n` +
+				`    fork._ensure_canonical_remappings(${JSON.stringify(await fs.realpath(c))}, ['forge-std']),\n` +
+				`    fork._ensure_canonical_remappings(${JSON.stringify(await fs.realpath(c))}, ['forge-std']),\n` +
+				`    fork._ensure_canonical_remappings(${JSON.stringify(await fs.realpath(d))}, ['openzeppelin-contracts']),\n` +
+				")",
+		);
+		expect(r.ok).toBe(true);
+		expect(r.result).toBe(
+			"([], ['@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/'], " +
+				"['forge-std/=lib/forge-std/src/'], [], [])",
+		);
+		// C was created and deduped on the second call (no header — foundry
+		// rejects non key=value lines in remappings.txt).
+		const created = await fs.readFile(path.join(c, "remappings.txt"), "utf-8");
+		expect(created).toBe("forge-std/=lib/forge-std/src/\n");
+		// D needed no remappings.txt at all.
+		await expect(fs.access(path.join(d, "remappings.txt"))).rejects.toThrow();
+	});
+
+	it("canonical remappings target the canonical lib dir for era-variant picks", async () => {
+		// Fake the era-variant cache entries (no network).
+		await fs.mkdir(path.join(depsDir, "openzeppelin-contracts-v4"), { recursive: true });
+		await fs.writeFile(path.join(depsDir, "openzeppelin-contracts-v4", "placeholder"), "x");
+		await fs.mkdir(path.join(depsDir, "forge-std-legacy", "lib", "ds-test", "src"), { recursive: true });
+		// =0.8.4 era -> OZ v4 + forge-std-legacy, but lib dirs + remapping
+		// targets stay canonical.
+		const proj = path.join(root, "prov-era");
+		await fs.mkdir(path.join(proj, "src"), { recursive: true });
+		await fs.writeFile(path.join(proj, "foundry.toml"), FOUNDRY_TOML);
+		await fs.writeFile(
+			path.join(proj, "src", "Token.sol"),
+			'// SPDX-License-Identifier: MIT\npragma solidity =0.8.4;\n' +
+				'import "@openzeppelin/contracts/token/ERC20/ERC20.sol";\ncontract Token {}\n',
+		);
+		const real = await fs.realpath(proj);
+		const r = await kernel.exec(
+			`linked, _paths = fork._symlink_std_libs(${JSON.stringify(real)}, "")\nsorted(linked)`,
+		);
+		expect(r.ok).toBe(true);
+		expect(r.result).toContain("'openzeppelin-contracts'");
+		// The symlink carries the canonical name but points at the v4 cache.
+		const ozLink = await fs.readlink(path.join(real, "lib", "openzeppelin-contracts"));
+		expect(ozLink).toContain("openzeppelin-contracts-v4");
+		const remappings = await fs.readFile(path.join(real, "remappings.txt"), "utf-8");
+		expect(remappings).toContain("@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/");
+		expect(remappings).toContain("forge-std/=lib/forge-std/src/");
 	});
 
 	it("find_foundry_root: root-level foundry.toml wins", async () => {
@@ -790,5 +899,65 @@ describe.skipIf(!canIntegrate)("template-mode OZ era selection (v3 legacy, real 
 		expect(["verified", "reverted"]).toContain(marker.verdict);
 		expect(r.result).toContain("'verified'");
 		await expect(fs.access(path.join(depsDir, "openzeppelin-contracts-legacy"))).resolves.toBeUndefined();
+	}, 320_000);
+});
+
+describe.skipIf(!canIntegrate)("repo-mode canonical remappings (escher-style, real forge + clone)", () => {
+	let root: string;
+	let repoDir: string;
+	let kernel: Kernel;
+	let depsReady = false;
+
+	beforeAll(async () => {
+		root = await fs.mkdtemp(path.join(os.tmpdir(), "attis-escher-int-"));
+		repoDir = path.join(root, "repo");
+		await fs.mkdir(path.join(repoDir, "src"), { recursive: true });
+		await fs.writeFile(path.join(repoDir, "foundry.toml"), FOUNDRY_TOML);
+		await fs.writeFile(path.join(repoDir, "remappings.txt"), ESCHER_REMAPPINGS);
+		await fs.writeFile(path.join(repoDir, "src", "EscherVault.sol"), ESCHER_VAULT);
+		kernel = await makeKernel(
+			repoDir,
+			path.join(root, "scratch"),
+			path.join(root, "deps"),
+			path.join(root, "journal"),
+		);
+		const warm = await kernel.exec(
+			'res = deps.ensure(["openzeppelin-contracts-upgradeable", "openzeppelin-contracts", "forge-std"])\n' +
+				"all(v is not None for v in res.values())",
+			{ timeoutMs: 300_000 },
+		);
+		depsReady = warm.result === "True";
+	}, 330_000);
+
+	afterAll(async () => {
+		await kernel.stop();
+		await fs.rm(root, { recursive: true, force: true });
+	});
+
+	it("foreign-prefix remappings get the canonical @-style lines appended (deduped across calls)", async (ctx) => {
+		if (!depsReady) ctx.skip();
+		const poc = JSON.stringify(POC_REPO_ESCHER);
+		const r = await kernel.exec(`fork.verify(${poc})`, { timeoutMs: 300_000 });
+		expect(r.ok).toBe(true);
+		const marker = parseMarker(r.stdout);
+		expect(marker.mode).toBe("repo");
+		expect(["verified", "reverted"]).toContain(marker.verdict);
+		expect(r.result).toContain("'verified'");
+
+		const remappings = await fs.readFile(path.join(repoDir, "remappings.txt"), "utf-8");
+		// The repo's own lines are preserved; the canonical ones were appended.
+		expect(remappings).toContain("openzeppelin-upgradeable/=lib/openzeppelin-contracts-upgradeable/contracts/");
+		expect(remappings).toContain("@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/");
+		expect(remappings).toContain(
+			"@openzeppelin/contracts-upgradeable/=lib/openzeppelin-contracts-upgradeable/contracts/",
+		);
+
+		// Second verify in the same session: no duplicate lines.
+		const r2 = await kernel.exec(`fork.verify(${poc})`, { timeoutMs: 300_000 });
+		expect(r2.ok).toBe(true);
+		const after = await fs.readFile(path.join(repoDir, "remappings.txt"), "utf-8");
+		expect(after.match(/@openzeppelin\/contracts\/=lib\/openzeppelin-contracts\/contracts\//g))
+			.toHaveLength(1);
+		expect(after).toBe(remappings);
 	}, 320_000);
 });
