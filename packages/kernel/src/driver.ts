@@ -72,7 +72,7 @@ export function scrubEnv(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
  */
 export function ulimitPrefix(): string[] {
 	if (process.platform === "win32") return [];
-	return ["/bin/sh", "-c", 'ulimit -u 512 2>/dev/null || true; exec "$@"', "sh"];
+	return ["/bin/sh", "-c", 'ulimit -u 4096 2>/dev/null || true; exec "$@"', "sh"];
 }
 
 export interface LocalDriverOptions {

@@ -491,7 +491,15 @@ function resolveEventsPath(repo: RolloutRepo, manifestDir: string): string | nul
 		return path.isAbsolute(repo.eventsPath) ? repo.eventsPath : path.resolve(manifestDir, repo.eventsPath);
 	}
 	if (repo.sessionId) {
-		return path.join(os.homedir(), ".attis", "sessions", safeName(repo.path), repo.sessionId, "events.jsonl");
+		// Manifest keys are repo paths relative to the repos root (the
+		// manifest's dir); journals key on the ABSOLUTE path's safeName.
+		// Single-repo rollouts: root IS the repo, key is its basename.
+		const repoPath = path.isAbsolute(repo.path)
+			? repo.path
+			: path.basename(manifestDir) === repo.path
+				? manifestDir
+				: path.resolve(manifestDir, repo.path);
+		return path.join(os.homedir(), ".attis", "sessions", safeName(repoPath), repo.sessionId, "events.jsonl");
 	}
 	return null;
 }

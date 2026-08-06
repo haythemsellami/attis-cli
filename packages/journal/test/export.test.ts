@@ -470,6 +470,36 @@ describe("exportRollout", () => {
 		}
 	});
 
+	it("resolves record-manifest relative keys against the manifest dir", async () => {
+		// Regression: attis rollout keys repos by path RELATIVE to the repos
+		// root, but journals live under safeName(<absolute repo path>) —
+		// resolution must join with the manifest's own directory first.
+		const reposRoot = path.join(root, "real-rollout");
+		const repoDir = path.join(reposRoot, "repo-a");
+		await fs.mkdir(repoDir, { recursive: true });
+		const home = path.join(root, "home-rel");
+		vi.stubEnv("HOME", home);
+		const eventsPath = await writeSession(
+			path.join(home, ".attis", "sessions", safeName(repoDir)),
+			"sess-rel",
+			goldSession(repoDir),
+		);
+		const manifestPath = path.join(reposRoot, ".attis-rollout.json");
+		await fs.writeFile(
+			manifestPath,
+			JSON.stringify({ version: 1, repos: { "repo-a": { status: "done", sessionId: "sess-rel" } } }),
+		);
+		try {
+			const out = await exportRollout(manifestPath);
+			expect(out.warnings).toEqual([]);
+			expect(out.sessions).toBe(1);
+			expect(out.rows).toHaveLength(1);
+			expect(out.rows[0].metadata.label).toBe("gold_positive");
+		} finally {
+			vi.unstubAllEnvs();
+		}
+	});
+
 	it("walks a sessions directory", async () => {
 		const dir = path.join(root, "walk");
 		await writeSession(dir, "alpha/sess-1", goldSession("/repos/alpha"));
