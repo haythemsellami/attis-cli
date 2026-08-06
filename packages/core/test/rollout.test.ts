@@ -246,13 +246,13 @@ describe("runRollout — manifest lifecycle", () => {
 		expect(prompts[0]).toContain("./IOracle.sol");
 		expect(prompts[0]).toContain("execute_code");
 
-		// The inventory pull itself is journaled as a kernel_exec entry.
+		// The inventory pull is journaled as repo_inventory (harness setup,
+		// not a model action — the exporter folds it into row metadata).
 		const rec = journals.byRepo.get(path.join(root, "repo-a"))!;
-		const inventoryWrite = rec.writes.find(
-			(w) => w.type === "kernel_exec" && String(w.data.code).includes("repo.tree()"),
-		);
+		const inventoryWrite = rec.writes.find((w) => w.type === "repo_inventory");
 		expect(inventoryWrite).toBeDefined();
 		expect(inventoryWrite!.data.ok).toBe(true);
+		expect(inventoryWrite!.data.files).toEqual(INVENTORY.files);
 	});
 
 	it("resume skips done repos and audits only the rest", async () => {
@@ -551,7 +551,7 @@ describe("runRollout — journaling", () => {
 		for (const repo of [a, b]) {
 			const rec = journals.byRepo.get(repo)!;
 			const types = rec.writes.map((w) => w.type);
-			expect(types).toContain("kernel_exec"); // the repo.tree() inventory pull
+			expect(types).toContain("repo_inventory"); // the harness repo.tree() pull
 			expect(types).toContain("audit_prompt");
 			expect(types).toContain("findings_parsed");
 			expect(types).toContain("report");

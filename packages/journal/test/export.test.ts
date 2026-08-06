@@ -542,4 +542,31 @@ describe("kernel fork.verify markers (repo-mode ground truth)", () => {
 		expect(rows[0].metadata.label).toBe("unlabeled");
 		expect(warnings.some((w) => w.includes("malformed ATTIS_FORK_VERDICT"))).toBe(true);
 	});
+
+	it("skips pre-prompt kernel_exec (harness setup in pre-repo_inventory journals)", async () => {
+		const ev = stamper();
+		const eventsPath = await writeSession(root, "pre-prompt", [
+			ev("session_start", { workdir: "/repos/v" }),
+			ev("kernel_exec", kernelExec("repo.tree()", { stdout: '{"files":["Vault.sol"]}\n' })),
+			ev("audit_prompt", { chars: 10, system: "SYS", prompt: "Audit this repo…" }),
+			ev(
+				"kernel_exec",
+				kernelExec("fork.verify(poc)", {
+					stdout: 'ATTIS_FORK_VERDICT {"verdict": "verified", "raw_log_path": "/x"}\n',
+				}),
+			),
+			ev("audit_result", { output_chars: 10, output: "### [High] Reentrancy" }),
+			ev("session_end", {}),
+		]);
+		const { rows, dropped, warnings } = await exportSession(eventsPath);
+		expect(dropped).toBe(0);
+		expect(rows).toHaveLength(1);
+		expect(rows[0].metadata.label).toBe("gold_positive");
+		expect(validateRow(rows[0])).toEqual([]);
+		expect(rows[0].messages[1].role).toBe("user");
+		expect(warnings.some((w) => w.includes("before the audit prompt"))).toBe(true);
+		// The skipped setup exec must not appear as a model action.
+		const calls = rows[0].messages.flatMap((m) => m.tool_calls ?? []);
+		expect(calls.some((c) => c.function.arguments.includes("repo.tree()"))).toBe(false);
+	});
 });

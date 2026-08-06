@@ -23,6 +23,7 @@ export type JournalEventType =
 	| "finding_dropped"
 	| "kernel_exec"
 	| "kernel_restart"
+	| "repo_inventory"
 	| "judge_verdict"
 	| "judge_error"
 	| "report"

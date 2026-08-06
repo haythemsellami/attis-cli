@@ -58,6 +58,8 @@ export interface RowMetadata {
 	verified_findings: number;
 	dropped_findings: number;
 	kernel_execs: number;
+	/** Repo file count from the harness inventory pull, when journaled. */
+	inventory_files?: number;
 }
 
 export interface TrainingRow {
@@ -207,6 +209,7 @@ interface SessionState {
 	droppedFindings: number;
 	kernelExecs: number;
 	seenPrompt: boolean;
+	inventoryFiles?: number;
 }
 
 function str(v: unknown): string | undefined {
@@ -407,7 +410,16 @@ export async function exportSession(eventsPath: string): Promise<SessionExport> 
 				break;
 			}
 			case "kernel_exec":
+				if (!st.seenPrompt) {
+					st.warnings.push("kernel_exec before the audit prompt (harness setup) — skipped");
+					break;
+				}
 				mapKernelExec(st, ev.data);
+				break;
+			case "repo_inventory":
+				// Harness setup (rollout's repo.tree() pull), not model behavior —
+				// the inventory already rides inside the audit prompt text.
+				if (Array.isArray(ev.data.files)) st.inventoryFiles = ev.data.files.length;
 				break;
 			case "kernel_restart":
 				break; // the restarted kernel_exec already carries the model-visible note
@@ -458,6 +470,7 @@ export async function exportSession(eventsPath: string): Promise<SessionExport> 
 			verified_findings: st.kept,
 			dropped_findings: st.droppedFindings,
 			kernel_execs: st.kernelExecs,
+			...(st.inventoryFiles !== undefined ? { inventory_files: st.inventoryFiles } : {}),
 		},
 	};
 

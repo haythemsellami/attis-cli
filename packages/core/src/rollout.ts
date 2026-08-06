@@ -210,27 +210,15 @@ export interface RepoInventory {
 
 const INVENTORY_CELL = "import json; print(json.dumps(repo.tree()))";
 
-/** Same field cap the execute_code tool applies to model-visible output. */
-const FIELD_CAP = 12_000;
-const cap = (s: string) => (s.length > FIELD_CAP ? `${s.slice(0, FIELD_CAP)}\n... <truncated>` : s);
-
 /**
- * Pull repo.tree() out of the kernel. Journaled as a kernel_exec entry with
- * the exact shape the execute_code tool writes (the exporter consumes it).
+ * Pull repo.tree() out of the kernel. Journaled as `repo_inventory` — harness
+ * setup, NOT model behavior: the exporter folds it into row metadata, and the
+ * inventory itself rides inside the audit prompt (buildRepoAuditPrompt).
  */
 async function loadInventory(kernel: Kernel, journal: Journal): Promise<RepoInventory> {
 	const r = await kernel.exec(INVENTORY_CELL);
-	await journal.write("kernel_exec", {
-		code: INVENTORY_CELL,
-		ok: r.ok,
-		result: r.result,
-		error: r.error,
-		stdout: cap(r.stdout),
-		stderr: cap(r.stderr),
-		duration_ms: r.durationMs,
-		restarted: r.restarted,
-	});
 	if (!r.ok) {
+		await journal.write("repo_inventory", { ok: false, error: r.error, duration_ms: r.durationMs });
 		throw new Error(`repo.tree() inventory failed: ${r.error?.message ?? "unknown kernel error"}`);
 	}
 	let inv: RepoInventory;
@@ -242,6 +230,9 @@ async function loadInventory(kernel: Kernel, journal: Journal): Promise<RepoInve
 	if (!Array.isArray(inv.files) || typeof inv.imports !== "object" || inv.imports === null) {
 		throw new Error("repo.tree() returned an unparseable inventory");
 	}
+	await journal.write("repo_inventory", {
+		ok: true, files: inv.files, imports: inv.imports, duration_ms: r.durationMs,
+	});
 	return inv;
 }
 
