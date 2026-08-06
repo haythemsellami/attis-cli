@@ -87,19 +87,40 @@ Modeled on kimi-code's drain-loop + typed request queue (everything is a plugin)
 ## 6. Tool system
 
 Wire format: **OpenAI function calling** (JSON-schema params, `tool_calls`) —
-native to vLLM/Qwen3.5/DeepSeek.
+the de facto standard every provider speaks (vLLM/DeepSeek/GLM/Qwen, and
+Claude via adapter). It keeps us provider-agnostic. (Settled 2026-08; see
+the note below on the model-facing surface.)
+
+**Code mode is fork execution.** Our code mode is not a Python REPL
+(OpenAI's container): the model writes forge tests, the fork sandbox
+executes them, the chain reports ground truth. `fork_verify` IS the code
+mode for this domain.
+
+**Model-facing surface (measured 2026-08):** the current fine-tuned 9B
+adapters emit **zero native tool calls** (0/30 smoke, attis v2 item 1) —
+narrow SFT overwrote the base model's tool-calling prior (catastrophic
+forgetting). So the model speaks to tools through **text markers**
+(`<<fetch: contracts/Oracle.sol>>`) parsed deterministically by the
+harness, NOT `tool_calls`, until orgia v8 trains tool discipline back
+(tool-call data mix, OpenAI wire shape, 5-10% of the dataset). Internal
+tools still use the OpenAI wire; only the model-facing request surface is
+markers.
 
 Per-tool design (kimi-style): each tool =
 `schema + resolveExecution → { accesses, approvalRule, execute }`.
-The model sees the schema; the harness sees the policy.
+The model sees the schema; the harness sees the policy. Tool system prompts
+carry **constraint descriptions** (Claude-style): when to call, how to fill
+arguments, and what NOT to do — the model behaves measurably better with
+these in-context.
 
-Registry v1:
+Registry v1 (the moat is the catalog, not the envelope):
 
 | Tool | Type | Accesses | Approval | Notes |
 |---|---|---|---|---|
 | `slither_scan` | read | contract files | auto (read-only) | static pass, JSON findings |
 | `fork_verify` | exec | anvil, forge | policy-gated (execpolicy) | run PoC on fork, return state-diff + traces |
 | `audit_repo` | read | repo files | auto | file discovery for repo-scale audits |
+| `fetch_file` | read | repo files | auto | scope-expansion fetch (marker-driven until v8) |
 | `score_finding` | read | — | auto | custom scorer (port/wrap from Python) |
 | `judge_semantic` | net | DeepSeek API | ask (network) | DeepSeek judge + TP-alt; `judge_control` trust check |
 | `generate_poc` | llm | model | auto | exploit-format generation (trained format) |

@@ -17,26 +17,35 @@ precision, and trace export.
 
 ## Work items (in order)
 
-### 1. Tool-call reliability smoke (decides the output contract)
+### 1. Tool-call reliability smoke — DONE, verdict recorded (2026-08)
 
-Before building tool-driven flows: verify the fine-tuned 9B drives native
-tool calls reliably (LoRAs never saw tool schemas). Serve an adapter, prompt
-with a fetch tool schema, measure call validity/argument quality across ~50
-prompts.
+Smoke ran against the fine-tuned 9B adapter: **0/30 schema-valid native
+tool calls** (30/30 answered in prose). Narrow SFT catastrophically forgot
+the base model's tool-calling prior — this is the known small-LoRA disease,
+not a serving bug.
 
-*Acceptance:* >95% schema-valid tool calls, or we fall back to structured
-text markers ("I need file X") parsed deterministically. Recorded verdict
-informs items 2 and 4.
+**Verdict:** the model-facing surface is **text markers** parsed
+deterministically by the harness, until orgia v8 retrains tool discipline
+with a tool-call data mix (5–10% of the v8 dataset, OpenAI function-calling
+wire shape — see orgia-llm `v8-plan.md`). Item 2 is built to the marker
+contract.
 
-### 2. `fetch_dependency` / repo-read tool — `packages/core/tools/`
+### 2. `fetch_file` / repo-read tool — `packages/core/tools/`
 
 The scope-expansion tool: the model requests a file it can't see (import,
 interface, proxy target), the harness returns it from the mounted repo.
-Includes scope discovery (`audit_repo` inventory: file list, imports graph).
 
-*Acceptance:* on a multi-file fixture (vault + oracle), the model requests
-the dependency mid-audit and its finding cites the interaction; tool is
-read-only, auto-approved, journaled.
+**Marker contract (from item 1's verdict):** the model emits
+`<<fetch: contracts/Oracle.sol>>` mid-analysis; the harness parses the
+marker, validates the path is inside the mounted repo scope, and returns the
+file content as a tool turn. Wire format internally is OpenAI function
+calling (provider-agnostic, spec §6); the marker is the model-side encoding
+until v8. Includes scope discovery (`audit_repo` inventory: file list,
+imports graph) so the model knows what exists.
+
+*Acceptance:* on a multi-file fixture (vault + oracle), the model emits the
+marker mid-audit and its finding cites the interaction; tool is read-only,
+auto-approved, journaled; path traversal outside repo scope is rejected.
 
 ### 3. Rollout mode — `bin/attis rollout <repo-dir>`
 

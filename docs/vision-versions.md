@@ -22,12 +22,24 @@
 | Flywheel loop closure (journal → training rows) | v5 | the moat, once journal shape stabilizes |
 | Thinking budgets per phase | evidence-gated | measure token distributions first |
 
-## Communication style (settled 2026-07-30)
+## Communication style (settled 2026-07-30, updated 2026-08 after smoke)
 
-- Envelope: OpenAI function-calling wire (codex/kimi-code style) for all
-  harness actions (`fork_verify`, `generate_poc`, `slither_scan`, ...).
-- Findings deliverable: (a) parse the trained prose contract (primary),
-  (c) structurer fallback for the unparseable tail, (b) tool-call findings
-  as a measured v2 smoke test that decides the v3 output contract.
-- Code Mode (nanocodex): on the v3+ radar for exploit orchestration, not a
-  foundation.
+- **Envelope**: OpenAI function-calling wire (codex/kimi-code style) for all
+  harness actions (`fork_verify`, `generate_poc`, `slither_scan`, ...). It
+  is the de facto standard every provider speaks — provider-agnostic by design.
+- **Schema content is OURS, not codex's**: the catalog is domain tools
+  (`fetch_file`, `fork_verify`, `slither_scan`, `report`) — the moat lives
+  in the catalog, not the envelope. `shell`/`apply_patch` belong to
+  generic-coding harnesses, not to an auditor.
+- **Layers stolen**: codex execpolicy (Starlark, self-testing), Claude-style
+  tool-constraint descriptions in the system prompt (when/how/not-to-call
+  per tool), kimi per-tool metadata (`schema + resolveExecution →
+  {accesses, approvalRule, execute}`).
+- **Code mode = fork execution** (not a Python REPL): the model writes
+  forge tests, the fork sandbox runs them, the chain reports ground truth.
+- **Model-facing surface (smoke verdict 2026-08)**: current LoRAs emit 0/30
+  native tool calls — narrow SFT overwrote the base tool-calling prior.
+  Model requests use deterministic text markers (`<<fetch: path>>`) until
+  orgia v8 retrains tool discipline with a tool-call data mix (OpenAI wire
+  shape, 5-10% of dataset). Findings deliverable stays: (a) parse the
+  trained prose contract (primary), (c) structurer fallback for the tail.
