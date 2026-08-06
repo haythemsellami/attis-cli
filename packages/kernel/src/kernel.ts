@@ -29,6 +29,12 @@ export interface KernelOptions {
 	 * callers should go through LocalDriver, which passes a scrubbed env.
 	 */
 	env?: NodeJS.ProcessEnv;
+	/**
+	 * Journal session dir — exposed to the sidecar as ATTIS_JOURNAL_DIR so
+	 * fork.verify can copy raw forge logs somewhere durable. LocalDriver
+	 * forwards ExecSession.journalDir here; direct callers may set it too.
+	 */
+	journalDir?: string;
 	/** argv prepended before python (LocalDriver's ulimit wrapper). */
 	execPrefix?: string[];
 	/** Called after every automatic restart (journal hook). */
@@ -156,7 +162,10 @@ class SidecarKernel implements Kernel {
 			this.opts.helpersDir,
 		];
 		const child = spawn(args[0], args.slice(1), {
-			env: this.opts.env ?? process.env,
+			env: {
+				...(this.opts.env ?? process.env),
+				...(this.opts.journalDir ? { ATTIS_JOURNAL_DIR: this.opts.journalDir } : {}),
+			},
 			stdio: ["pipe", "pipe", "pipe"],
 		});
 		this.child = child;

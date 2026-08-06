@@ -15,7 +15,7 @@ import type { Journal } from "@attis/journal";
 const Params = Type.Object({
 	code: Type.String({
 		description:
-			"Python code to execute in the persistent audit kernel. Variables and imports survive across calls. Preloaded helpers: repo.tree()/repo.read(path), fork.create(rpc_url?, block?)/fork.verify(poc_source, setup?)/fork.snapshot()/fork.revert(id), slither.scan(path?).",
+			"Python code to execute in the persistent audit kernel. Variables and imports survive across calls. Preloaded helpers: repo.tree()/repo.read(path), fork.create(rpc_url?, block?)/fork.verify(poc_source, setup?)/fork.snapshot()/fork.revert(id), slither.scan(path?). fork.verify auto-detects the repo's foundry project (root or nested ≤2 levels) and runs the PoC inside it with deps auto-provided (forge-std/OpenZeppelin/solmate/solady) — override with setup={\"foundry_root\": \"<path>\"}; on repos without foundry.toml it stages sources + remappings into a template workspace.",
 	}),
 	timeout_ms: Type.Optional(
 		Type.Number({ description: "Per-call timeout in milliseconds (default 120000)." }),

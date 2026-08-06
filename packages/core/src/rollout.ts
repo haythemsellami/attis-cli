@@ -357,7 +357,13 @@ async function runRepoAudit(ctx: RepoRunContext): Promise<{ verified: number; fi
 	const { journal } = ctx;
 	let env: ExecEnv | null = null;
 	try {
-		env = await ctx.driver.prepare({ id: journal.session.id, repoRoot: ctx.repoPath });
+		env = await ctx.driver.prepare({
+			id: journal.session.id,
+			repoRoot: ctx.repoPath,
+			// fork.verify raw logs land here (ATTIS_JOURNAL_DIR) — durable
+			// evidence past the session scratch cleanup.
+			journalDir: journal.session.dir,
+		});
 		const inventory = await loadInventory(env.kernel, journal);
 		const executeCode = createExecuteCodeTool({
 			kernel: env.kernel,

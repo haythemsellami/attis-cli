@@ -34,7 +34,7 @@ import traceback
 # Audit helper library bootstrap list (spec §6): each entry is a plain
 # <helpers_dir>/<name>.py module injected into the kernel namespace under
 # its name. Adding a helper later = drop a file + one line here.
-HELPERS = ["repo", "fork", "slither"]
+HELPERS = ["repo", "fork", "slither", "deps"]
 
 MAX_RESULT_REPR = 10_000
 MAX_STDIO = 200_000
