@@ -23,6 +23,10 @@ export interface LoopOptions {
 	auditPrompt?: string;
 	/** Journaled with audit_prompt so exports can rebuild the full system message. */
 	systemPrompt?: string;
+	/** Set false for repo rollouts: the agent verifies through kernel
+	 *  fork.verify (harness-executed); the deterministic phase below is the
+	 *  single-contract path and would fail on missing repo files. */
+	deterministicVerify?: boolean;
 	onEvent?: (event: Record<string, unknown>) => void;
 }
 
@@ -37,6 +41,8 @@ export interface LoopReport {
 	dropped: { finding: Finding; reason: string }[];
 	safeVerdict: boolean;
 	unparseable: boolean;
+	/** Findings parsed from the audit output (0 when safe/unparseable). */
+	parsedCount: number;
 }
 
 const SEV_ORDER: Record<Severity, number> = { Critical: 4, High: 3, Medium: 2, Low: 1 };
@@ -84,9 +90,21 @@ export async function runAuditLoop(code: string, opts: LoopOptions): Promise<Loo
 		dropped: [],
 		safeVerdict: parsed.isSafe,
 		unparseable: parsed.unparseable,
+		parsedCount: parsed.findings.length,
 	};
 	if (parsed.unparseable || parsed.isSafe || parsed.findings.length === 0) {
 		await journal.write("report", { verified: 0, dropped: 0, safe: parsed.isSafe });
+		return report;
+	}
+
+	// Repo rollouts verify agent-side through kernel fork.verify (harness-
+	// executed ground truth). The deterministic phase would regenerate PoCs
+	// against the inventory JSON and fail on missing repo files — wasting
+	// teacher tokens and poisoning labels with false verification_failed.
+	if (opts.deterministicVerify === false) {
+		await journal.write("report", {
+			verified: 0, dropped: 0, parsed: parsed.findings.length, agentVerified: true,
+		});
 		return report;
 	}
 

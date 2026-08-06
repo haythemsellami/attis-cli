@@ -161,8 +161,10 @@ export interface ManifestRepo {
 	status: RepoStatus;
 	/** Journal session id of the (last) run. */
 	sessionId?: string;
-	/** Verified-finding count of the completed run. */
+	/** Deterministically verified findings (v1 single-contract path; 0 in repo mode). */
 	verified?: number;
+	/** Findings parsed from the agent's audit (repo mode metric; agent verifies via kernel fork.verify). */
+	findings?: number;
 	/** Failure message when status is "failed". */
 	error?: string;
 }
@@ -327,6 +329,7 @@ export interface RolloutRepoResult {
 	repo: string;
 	status: "done" | "failed" | "skipped";
 	verified?: number;
+	findings?: number;
 	sessionId?: string;
 	error?: string;
 }
@@ -359,7 +362,7 @@ interface RepoRunContext {
 }
 
 /** One repo: kernel up → inventory → audit loop → journal → cleanup. */
-async function runRepoAudit(ctx: RepoRunContext): Promise<{ verified: number }> {
+async function runRepoAudit(ctx: RepoRunContext): Promise<{ verified: number; findings: number }> {
 	const { journal } = ctx;
 	let env: ExecEnv | null = null;
 	try {
@@ -394,13 +397,14 @@ async function runRepoAudit(ctx: RepoRunContext): Promise<{ verified: number }> 
 			journal,
 			auditPrompt: buildRepoAuditPrompt(inventory),
 			systemPrompt: ROLLOUT_SYSTEM_PROMPT,
+			deterministicVerify: false, // agent verifies via kernel fork.verify
 			onEvent: ctx.emit,
 		});
 		if (agentError) {
 			throw new Error(`model endpoint error during audit: ${agentError}`);
 		}
-		await journal.close({ verified: report.verifiedFindings.length });
-		return { verified: report.verifiedFindings.length };
+		await journal.close({ verified: report.verifiedFindings.length, findings: report.parsedCount });
+		return { verified: report.verifiedFindings.length, findings: report.parsedCount };
 	} catch (err) {
 		// The error lands in the repo's own journal (session_end) and the
 		// manifest — the batch then moves on to the next repo.
@@ -520,7 +524,7 @@ export async function runRollout(opts: RolloutOptions): Promise<RolloutSummary> 
 
 		const repoEmit = (event: Record<string, unknown>) => emit({ ...event, repo: name });
 		try {
-			const { verified } = await runRepoAudit({
+			const { verified, findings } = await runRepoAudit({
 				repoPath,
 				journal,
 				driver,
@@ -532,14 +536,16 @@ export async function runRollout(opts: RolloutOptions): Promise<RolloutSummary> 
 			});
 			entry.status = "done";
 			entry.verified = verified;
+			entry.findings = findings;
 			summary.done += 1;
 			summary.results.push({
 				repo: name,
 				status: "done",
 				verified,
+				findings,
 				sessionId: journal.session.id,
 			});
-			emit({ type: "repo_done", ...progress, verified, sessionId: journal.session.id });
+			emit({ type: "repo_done", ...progress, verified, findings, sessionId: journal.session.id });
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
 			entry.status = "failed";

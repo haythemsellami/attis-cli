@@ -111,7 +111,7 @@ function repoProgressLine(event: Record<string, unknown>): string | null {
 		case "repo_start":
 			return `[${event.index}/${event.total}] ${repo} — auditing…`;
 		case "repo_done":
-			return `[${event.index}/${event.total}] ${repo} — done (${event.verified} verified)`;
+			return `[${event.index}/${event.total}] ${repo} — done (${event.findings ?? event.verified ?? 0} findings)`;
 		case "repo_failed":
 			return `[${event.index}/${event.total}] ${repo} — FAILED: ${event.error}`;
 		case "repo_skipped":

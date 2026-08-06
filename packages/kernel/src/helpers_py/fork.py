@@ -182,6 +182,14 @@ def _summarize(output, tail_lines=30):
     return summary + "\n".join(tail)
 
 
+def _emit_verdict(v):
+    """Print the canonical machine-readable verdict line (journal label
+    extraction keys off ATTIS_FORK_VERDICT in kernel_exec stdout), then return."""
+    print("ATTIS_FORK_VERDICT " + json.dumps({
+        "verdict": v.get("verdict"), "raw_log_path": v.get("raw_log_path")}))
+    return v
+
+
 def verify(poc_source, setup=None):
     """Write a PoC into a forge workspace, run `forge test`, parse output.
 
@@ -204,9 +212,9 @@ def verify(poc_source, setup=None):
     setup = setup or {}
     forge = shutil.which("forge")
     if not forge:
-        return {"verdict": "error", "state_diff": {}, "traces_summary": "",
-                "raw_log_path": None,
-                "error": "forge not found on PATH (install foundryup)"}
+        return _emit_verdict({"verdict": "error", "state_diff": {}, "traces_summary": "",
+                              "raw_log_path": None,
+                              "error": "forge not found on PATH (install foundryup)"})
     run_dir = _materialize(poc_source, setup.get("files"))
     log_path = os.path.join(run_dir, "forge-output.log")
     args = [forge, "test", "--match-path", "test/Poc.t.sol", "-vvvv"]
@@ -223,9 +231,9 @@ def verify(poc_source, setup=None):
         output = out + "\n" + err + f"\n<forge timed out after {e.timeout}s>"
     with open(log_path, "w") as f:
         f.write(output)
-    return {
+    return _emit_verdict({
         "verdict": _parse_verdict(output),
         "state_diff": {},
         "traces_summary": _summarize(output),
         "raw_log_path": log_path,
-    }
+    })

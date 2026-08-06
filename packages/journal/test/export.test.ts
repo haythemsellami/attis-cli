@@ -489,3 +489,57 @@ describe("exportRollout", () => {
 		expect(out.warnings.some((w) => w.includes("not found"))).toBe(true);
 	});
 });
+
+describe("kernel fork.verify markers (repo-mode ground truth)", () => {
+	/** Repo-mode sessions: no poc_generated/fork_verdict events — verification
+	 *  happens agent-side in the kernel and lands as stdout markers. */
+	function repoModeSession(workdir: string, verdict: string): string[] {
+		const ev = stamper();
+		return [
+			ev("session_start", { workdir }),
+			ev("audit_prompt", { chars: 55, system: "SYS", prompt: "Audit this Solidity repo…" }),
+			ev("kernel_exec", kernelExec("repo.tree()", { stdout: '{"files":["src/Vault.sol"]}\n' })),
+			ev(
+				"kernel_exec",
+				kernelExec('fork.verify(poc, {"setup": setup})', {
+					stdout: `ATTIS_FORK_VERDICT {"verdict": "${verdict}", "raw_log_path": "/tmp/x/forge-output.log"}\n{"verdict": "${verdict}"}\n`,
+				}),
+			),
+			ev("audit_result", { output_chars: 80, output: "### [Critical] Reentrancy in withdraw()" }),
+			ev("findings_parsed", { count: 1, isSafe: false, unparseable: false }),
+			ev("report", { verified: 0, dropped: 0, parsed: 1, agentVerified: true }),
+			ev("session_end", { verified: 0, findings: 1 }),
+		];
+	}
+
+	it("labels a kernel-verified repo session gold_positive", async () => {
+		const eventsPath = await writeSession(root, "marker-gold", repoModeSession("/repos/v", "verified"));
+		const { rows, dropped } = await exportSession(eventsPath);
+		expect(dropped).toBe(0);
+		expect(rows).toHaveLength(1);
+		expect(rows[0].metadata.label).toBe("gold_positive");
+		expect(validateRow(rows[0])).toEqual([]);
+	});
+
+	it("labels a failed kernel verification hard_negative", async () => {
+		const eventsPath = await writeSession(root, "marker-hard", repoModeSession("/repos/v", "reverted"));
+		const { rows, dropped } = await exportSession(eventsPath);
+		expect(dropped).toBe(0);
+		expect(rows).toHaveLength(1);
+		expect(rows[0].metadata.label).toBe("hard_negative");
+	});
+
+	it("ignores malformed markers and stays unlabeled", async () => {
+		const ev = stamper();
+		const eventsPath = await writeSession(root, "marker-bad", [
+			ev("session_start", { workdir: "/repos/v" }),
+			ev("audit_prompt", { chars: 10, prompt: "p", system: "s" }),
+			ev("kernel_exec", kernelExec("fork.verify(poc)", { stdout: "ATTIS_FORK_VERDICT {not json}\n" })),
+			ev("audit_result", { output_chars: 10, output: "analysis" }),
+			ev("session_end", {}),
+		]);
+		const { rows, warnings } = await exportSession(eventsPath);
+		expect(rows[0].metadata.label).toBe("unlabeled");
+		expect(warnings.some((w) => w.includes("malformed ATTIS_FORK_VERDICT"))).toBe(true);
+	});
+});

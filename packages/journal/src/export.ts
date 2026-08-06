@@ -8,10 +8,11 @@
  * + tool result, audit_result / poc_generated / report → assistant messages,
  * fork_verdict → the verification's tool result + the row's quality label.
  *
- * Labels: any verified finding (fork_verdict verified / finding_kept) →
- * gold_positive; only failed verifications (reverted beyond retries /
- * finding_dropped with verification_failed) → hard_negative; no verdict
- * journaled → unlabeled (exported, marked).
+ * Labels: any verified finding (fork_verdict verified / finding_kept /
+ * kernel fork.verify ATTIS_FORK_VERDICT marker) → gold_positive; only
+ * failed verifications (reverted beyond retries / finding_dropped with
+ * verification_failed / failed kernel verdicts) → hard_negative; no
+ * verdict journaled → unlabeled (exported, marked).
  *
  * Every row is validated before it ships (role order, tool_call pairing,
  * JSON arguments, non-empty content). Invalid rows are dropped with a
@@ -40,6 +41,11 @@ export interface ChatMessage {
 }
 
 export type RowLabel = "gold_positive" | "hard_negative" | "unlabeled";
+
+/** Canonical verdict marker printed by the kernel's fork.verify helper —
+ *  the repo-mode ground truth for labels (v1's fork_verdict events only
+ *  exist in the deterministic single-contract path). */
+export const FORK_VERDICT_MARKER = "ATTIS_FORK_VERDICT ";
 
 export interface RowMetadata {
 	session_id: string;
@@ -249,6 +255,20 @@ function mapKernelExec(st: SessionState, data: Record<string, unknown>): void {
 	if (!code) {
 		st.warnings.push("kernel_exec without code — tool_call pair skipped");
 		return;
+	}
+	// Kernel-side fork.verify prints a canonical marker into stdout — this is
+	// the repo-mode ground truth the label keys on (v1's fork_verdict events
+	// only exist in the deterministic single-contract path).
+	const stdout = typeof data.stdout === "string" ? data.stdout : "";
+	for (const line of stdout.split("\n")) {
+		if (!line.startsWith(FORK_VERDICT_MARKER)) continue;
+		try {
+			const marker = JSON.parse(line.slice(FORK_VERDICT_MARKER.length)) as { verdict?: string };
+			if (marker.verdict === "verified") st.sawVerified = true;
+			else if (marker.verdict) st.sawFailed = true;
+		} catch {
+			st.warnings.push("malformed ATTIS_FORK_VERDICT marker — ignored for the label");
+		}
 	}
 	const id = `call_${st.callSeq++}`;
 	st.messages.push({

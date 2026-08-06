@@ -555,7 +555,7 @@ describe("runRollout — journaling", () => {
 			expect(types).toContain("audit_prompt");
 			expect(types).toContain("findings_parsed");
 			expect(types).toContain("report");
-			expect(rec.closed).toEqual([{ verified: 0 }]);
+			expect(rec.closed).toEqual([{ verified: 0, findings: 0 }]);
 		}
 	});
 });

@@ -116,6 +116,38 @@ describe("flywheel: loop → journal → training row", () => {
 		expect(warnings).toEqual([]);
 	});
 
+	it("repo mode (deterministicVerify: false) skips the anvil phase and journals parsedCount", async () => {
+		await tmpHome();
+		const journal = await Journal.open("flywheel-repomode");
+		// No anvil passed — if the loop tried the deterministic phase it would
+		// spawn one (and then fail on missing repo files, the bug this prevents).
+		const report = await runAuditLoop(VAULT_CODE, {
+			agent: fakeAgent(FINDING_REPLY),
+			pocTool: stubPocTool(""),
+			journal,
+			systemPrompt: SYSTEM_PROMPT,
+			deterministicVerify: false,
+		});
+		expect(report.parsedCount).toBe(1);
+		expect(report.verifiedFindings).toHaveLength(0);
+		await journal.close({ verified: 0, findings: report.parsedCount });
+
+		const raw = await fs.readFile(journal.session.eventsPath, "utf-8");
+		const reportEvent = raw
+			.split("\n")
+			.filter(Boolean)
+			.map((l) => JSON.parse(l) as { type: string; data: Record<string, unknown> })
+			.find((e) => e.type === "report");
+		expect(reportEvent?.data).toMatchObject({ parsed: 1, agentVerified: true });
+
+		// No verdicts in repo mode without a kernel marker → unlabeled, valid row.
+		const { rows, dropped } = await exportSession(journal.session.eventsPath);
+		expect(dropped).toBe(0);
+		expect(rows).toHaveLength(1);
+		expect(rows[0].metadata.label).toBe("unlabeled");
+		expect(validateRow(rows[0])).toEqual([]);
+	});
+
 	it.skipIf(!hasFoundry)(
 		"verified session exports a gold_positive row with a fork.verify tool pair",
 		async () => {
