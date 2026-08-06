@@ -20,6 +20,51 @@
 import { readFileSync } from "node:fs";
 import { createAuditAgent, createGeneratePocTool, runAuditLoop, runRollout, parseRolloutArgs, ROLLOUT_USAGE, type RolloutCliArgs } from "../packages/core/src/index.js";
 import { Journal } from "../packages/journal/src/index.js";
+import { createServingManager, type DriverName } from "../packages/serving/src/index.js";
+
+/** Extract --serving NAME from argv (returns argv with the flag removed). */
+function extractServingFlag(argv: string[]): { serving: DriverName; rest: string[] } {
+	const rest = [...argv];
+	let serving: DriverName = "env";
+	const i = rest.indexOf("--serving");
+	if (i !== -1) {
+		const name = rest[i + 1] ?? "";
+		if (name !== "env" && name !== "local" && name !== "runpod") {
+			throw new Error(`--serving must be env|local|runpod (got "${name}")`);
+		}
+		serving = name;
+		rest.splice(i, 2);
+	}
+	return { serving, rest };
+}
+
+/**
+ * Run fn against a serving-driver endpoint. The manager guarantees stop()
+ * (and for runpod, pod stop — via the watchdog even on kill -9). "env"
+ * changes nothing: the existing env-var endpoint rules apply.
+ */
+async function withServing<T>(name: DriverName, fn: () => Promise<T>): Promise<T> {
+	if (name === "env") return fn();
+	process.stderr.write(`attis: starting serving driver "${name}"…\n`);
+	const manager = createServingManager();
+	try {
+		return await manager.withEndpoint(name, async (endpoint) => {
+			const prev = { base: process.env.ATTIS_BASE_URL, model: process.env.ATTIS_MODEL };
+			process.env.ATTIS_BASE_URL = endpoint.baseUrl;
+			process.env.ATTIS_MODEL = endpoint.model;
+			try {
+				return await fn();
+			} finally {
+				if (prev.base === undefined) delete process.env.ATTIS_BASE_URL;
+				else process.env.ATTIS_BASE_URL = prev.base;
+				if (prev.model === undefined) delete process.env.ATTIS_MODEL;
+				else process.env.ATTIS_MODEL = prev.model;
+			}
+		});
+	} finally {
+		process.stderr.write(`attis: serving driver "${name}" stopped\n`);
+	}
+}
 
 interface CliOptions {
 	command: string;
@@ -46,12 +91,15 @@ function parseArgs(argv: string[]): CliOptions {
 const USAGE = `attis — the harness that drives Orgia
 
 Usage:
-  attis audit <file.sol> [--verify] [--output stream-json|text]
-  attis rollout <repos-root> [--teacher deepseek] [--force] [--output stream-json|text] [--max-repos N] [--manifest path]
+  attis audit <file.sol> [--verify] [--output stream-json|text] [--serving env|local|runpod]
+  attis rollout <repos-root> [--teacher deepseek] [--force] [--output stream-json|text] [--max-repos N] [--manifest path] [--serving env|local|runpod]
   attis inspect <events.jsonl>
 
   --verify   run the full loop: audit → parse → per-finding PoC →
              fork-verify (anvil+forge) → verified-only report
+  --serving  serving driver for the model endpoint (default env). local
+             spawns vllm; runpod starts the pod + tunnel and ALWAYS stops
+             it on exit (watchdog covers kill -9)
   rollout    batch mode: audit every repo under <repos-root> (or a single
              repo dir) with the kernel enabled; resumable via the manifest
   inspect    replay a session journal (NDJSON, in order)
@@ -102,10 +150,19 @@ async function runRolloutCommand(argv: string[]): Promise<number> {
 }
 
 async function main(): Promise<void> {
-	const argv = process.argv.slice(2);
+	const { serving, rest: argv } = extractServingFlag(process.argv.slice(2));
 	if (argv[0] === "rollout") {
-		process.exit(await runRolloutCommand(argv.slice(1)));
+		process.exit(await withServing(serving, () => runRolloutCommand(argv.slice(1))));
 	}
+	if (serving !== "env") {
+		// audit path: wrap the whole command body in the serving scope
+		await withServing(serving, () => runAuditCommand(argv));
+		return;
+	}
+	await runAuditCommand(argv);
+}
+
+async function runAuditCommand(argv: string[]): Promise<void> {
 	const opts = parseArgs(argv);
 	if (opts.command === "inspect" && opts.file) {
 		// Minimal journal replay (roadmap item 5 acceptance): print the
