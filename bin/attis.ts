@@ -8,15 +8,17 @@
  *
  * Usage:
  *   attis audit <file.sol> [--output stream-json|text]
+ *   attis rollout <repos-root> [--teacher deepseek] [--force] [--max-repos N]
  *
  * Env:
  *   ATTIS_BASE_URL   OpenAI-compatible endpoint (default http://localhost:8000/v1)
  *   ATTIS_API_KEY    endpoint key (dummy ok for local vLLM)
  *   ATTIS_MODEL      model id at the endpoint (default "orgia")
  *   ATTIS_ALLOW_FORK set to 1 to allow fork_verify execution (else gated)
+ *   DEEPSEEK_BASE_URL / DEEPSEEK_MODEL / DEEPSEEK_API_KEY  (--teacher deepseek)
  */
 import { readFileSync } from "node:fs";
-import { createAuditAgent, createGeneratePocTool, runAuditLoop } from "../packages/core/src/index.js";
+import { createAuditAgent, createGeneratePocTool, runAuditLoop, runRollout, parseRolloutArgs, ROLLOUT_USAGE, type RolloutCliArgs } from "../packages/core/src/index.js";
 import { Journal } from "../packages/journal/src/index.js";
 
 interface CliOptions {
@@ -45,15 +47,66 @@ const USAGE = `attis — the harness that drives Orgia
 
 Usage:
   attis audit <file.sol> [--verify] [--output stream-json|text]
+  attis rollout <repos-root> [--teacher deepseek] [--force] [--output stream-json|text] [--max-repos N] [--manifest path]
   attis inspect <events.jsonl>
 
   --verify   run the full loop: audit → parse → per-finding PoC →
              fork-verify (anvil+forge) → verified-only report
+  rollout    batch mode: audit every repo under <repos-root> (or a single
+             repo dir) with the kernel enabled; resumable via the manifest
   inspect    replay a session journal (NDJSON, in order)
 `;
 
+function repoProgressLine(event: Record<string, unknown>): string | null {
+	const repo = String(event.repo ?? "");
+	switch (event.type) {
+		case "repo_start":
+			return `[${event.index}/${event.total}] ${repo} — auditing…`;
+		case "repo_done":
+			return `[${event.index}/${event.total}] ${repo} — done (${event.verified} verified)`;
+		case "repo_failed":
+			return `[${event.index}/${event.total}] ${repo} — FAILED: ${event.error}`;
+		case "repo_skipped":
+			return `[${event.index}/${event.total}] ${repo} — skipped (already done)`;
+		default:
+			return null;
+	}
+}
+
+/** `attis rollout` — batch driver (roadmap v2 item 3). Returns the exit code. */
+async function runRolloutCommand(argv: string[]): Promise<number> {
+	let args: RolloutCliArgs;
+	try {
+		args = parseRolloutArgs(argv);
+	} catch (err) {
+		process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n${ROLLOUT_USAGE}\n`);
+		return 1;
+	}
+	const emit = (event: Record<string, unknown>) => {
+		if (args.output === "stream-json") {
+			process.stdout.write(`${JSON.stringify(event)}\n`);
+		} else {
+			const line = repoProgressLine(event);
+			if (line) process.stdout.write(`${line}\n`);
+		}
+	};
+	const summary = await runRollout({ ...args, onEvent: emit });
+	if (args.output === "text") {
+		process.stdout.write(
+			`rollout complete: ${summary.done} done, ${summary.failed} failed, ` +
+				`${summary.skipped} skipped of ${summary.total} (manifest: ${summary.manifestPath})\n`,
+		);
+	}
+	// 0 when ≥1 repo is done (this run or a previous one), 1 when all failed.
+	return summary.done + summary.skipped >= 1 || summary.failed === 0 ? 0 : 1;
+}
+
 async function main(): Promise<void> {
-	const opts = parseArgs(process.argv.slice(2));
+	const argv = process.argv.slice(2);
+	if (argv[0] === "rollout") {
+		process.exit(await runRolloutCommand(argv.slice(1)));
+	}
+	const opts = parseArgs(argv);
 	if (opts.command === "inspect" && opts.file) {
 		// Minimal journal replay (roadmap item 5 acceptance): print the
 		// session's events in order as NDJSON.

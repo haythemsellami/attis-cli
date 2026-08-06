@@ -10,3 +10,29 @@ export { scoreFindings, titlesOverlap, createJudge, JudgeError } from "./eval/in
 export type { ExpectedBug, ScoreResult, Judge, JudgeConfig, JudgeVerdict } from "./eval/index.js";
 export { runAuditLoop } from "./loop.js";
 export type { LoopOptions, LoopReport, VerifiedFinding } from "./loop.js";
+export {
+	runRollout,
+	discoverRepos,
+	loadManifest,
+	parseRolloutArgs,
+	teacherServingConfig,
+	buildRepoAuditPrompt,
+	ROLLOUT_SYSTEM_PROMPT,
+	ROLLOUT_USAGE,
+} from "./rollout.js";
+export type {
+	EnvMap,
+	JournalFactory,
+	ManifestRepo,
+	RepoInventory,
+	RepoStatus,
+	RolloutAgentContext,
+	RolloutAgentFactory,
+	RolloutCliArgs,
+	RolloutManifest,
+	RolloutOptions,
+	RolloutPocToolFactory,
+	RolloutRepoResult,
+	RolloutSummary,
+	TeacherName,
+} from "./rollout.js";

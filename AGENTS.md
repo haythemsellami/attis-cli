@@ -61,10 +61,17 @@ This repo is open source. The model work is not. The line:
   - `pnpm attis audit <file.sol> -- --output stream-json` — headless audit
     (env: `ATTIS_BASE_URL`, `ATTIS_API_KEY`, `ATTIS_MODEL`, `ATTIS_ALLOW_FORK=1`
     to un-gate fork_verify)
+  - `pnpm attis rollout <repos-root> -- --teacher deepseek --force` — batch
+    repo audits with the kernel (resumable via `<root>/.attis-rollout.json`)
 
 ## Status
 
-**v1 COMPLETE (2026-07-30)** — all roadmap exit criteria met (verified loop
-on fixture, safe case, tests, journal). attis-cli is parked: NO new
-implementation without discussing it with the user first (their explicit
-rule). Next milestone work starts by rewriting `docs/roadmap.md` for v2.
+**v2 IN PROGRESS (2026-08)** — code-mode redesign (docs/spec.md §6). Landed:
+`execute_code` kernel (persistent Python sidecar + audit helper library +
+LocalDriver + execpolicy), serving-manager (env/local/runpod drivers with
+guaranteed pod stop), judge/scorer services, rollout mode, journal →
+training-row exporter (flywheel contract proven end-to-end by
+packages/core/test/flywheel.test.ts). Still ahead: real teacher-endpoint
+rollout (pod), then orgia v8 dataset + training (orgia-llm `v8-plan.md`).
+Rule unchanged: discuss with the user before new implementation; roadmap is
+rewritten before each milestone.

@@ -41,7 +41,8 @@ export interface SessionInfo {
 	eventsPath: string;
 }
 
-function safeName(p: string): string {
+/** Session dir name for a workdir — also used by the exporter's manifest resolution. */
+export function safeName(p: string): string {
 	return p.replace(/[^a-zA-Z0-9_.-]+/g, "_").slice(-80) || "root";
 }
 
@@ -82,3 +83,6 @@ export class Journal {
 export function contentHash(s: string): string {
 	return crypto.createHash("sha256").update(s).digest("hex").slice(0, 16);
 }
+
+// Roadmap v2 item 5: journal → orgia-llm training-row exporter.
+export * from "./export.js";

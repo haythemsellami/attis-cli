@@ -19,6 +19,10 @@ export interface LoopOptions {
 	journal: Journal;
 	anvil?: AnvilHandle;
 	maxRetriesPerFinding?: number;
+	/** Repo rollouts replace the single-contract prompt with the inventory prompt. */
+	auditPrompt?: string;
+	/** Journaled with audit_prompt so exports can rebuild the full system message. */
+	systemPrompt?: string;
 	onEvent?: (event: Record<string, unknown>) => void;
 }
 
@@ -57,13 +61,18 @@ export async function runAuditLoop(code: string, opts: LoopOptions): Promise<Loo
 	const maxRetries = opts.maxRetriesPerFinding ?? 2;
 
 	// --- audit phase ---
-	await journal.write("audit_prompt", { chars: code.length });
+	// Full-text journaling: the item-5 exporter rebuilds training rows from
+	// these payloads — char counts alone would make the row drop.
+	const prompt = opts.auditPrompt ?? `Audit this contract:\n\n\`\`\`solidity\n${code}\n\`\`\``;
+	await journal.write("audit_prompt", {
+		chars: code.length, prompt, ...(opts.systemPrompt ? { system: opts.systemPrompt } : {}),
+	});
 	emit({ type: "step", step: "audit" });
-	await agent.prompt(`Audit this contract:\n\n\`\`\`solidity\n${code}\n\`\`\``);
+	await agent.prompt(prompt);
 	await agent.waitForIdle();
 
 	const output = assistantText(agent);
-	await journal.write("audit_result", { output_chars: output.length });
+	await journal.write("audit_result", { output_chars: output.length, output });
 	const parsed = parseFindings(output);
 	await journal.write("findings_parsed", {
 		count: parsed.findings.length, isSafe: parsed.isSafe, unparseable: parsed.unparseable,
@@ -107,7 +116,7 @@ export async function runAuditLoop(code: string, opts: LoopOptions): Promise<Loo
 			const extracted = (pocResult.details as { code?: string } | undefined)?.code;
 			if (extracted) pocCode = extracted;
 			await journal.write("poc_generated", {
-				title: finding.title, attempt, poc_chars: pocCode.length, retryHint,
+				title: finding.title, attempt, poc_chars: pocCode.length, retryHint, code: pocCode,
 			});
 
 			verdict = await runPocOnAnvil(anvil, pocCode);
@@ -130,6 +139,11 @@ export async function runAuditLoop(code: string, opts: LoopOptions): Promise<Loo
 
 	await journal.write("report", {
 		verified: report.verifiedFindings.length, dropped: report.dropped.length,
+		// Structured payloads only — never synthesized prose. The exporter
+		// builds the final assistant message from the model's own words.
+		verifiedFindings: report.verifiedFindings.map((f) => ({
+			title: f.title, severity: f.severity, impact: f.impact, pocCode: f.pocCode,
+		})),
 	});
 	emit({ type: "report", verified: report.verifiedFindings.length, dropped: report.dropped.length });
 	return report;
