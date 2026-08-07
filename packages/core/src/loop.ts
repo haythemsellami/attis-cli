@@ -47,7 +47,7 @@ export interface LoopReport {
 
 const SEV_ORDER: Record<Severity, number> = { Critical: 4, High: 3, Medium: 2, Low: 1 };
 
-function assistantText(agent: Agent): string {
+export function assistantText(agent: Agent): string {
 	const msgs = agent.state.messages;
 	for (let i = msgs.length - 1; i >= 0; i--) {
 		const m = msgs[i] as { role?: string; content?: unknown };

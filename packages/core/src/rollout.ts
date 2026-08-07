@@ -29,7 +29,8 @@ import {
 import { Journal } from "@attis/journal";
 import type { ServingConfig } from "@attis/serving";
 import { createAuditAgent } from "./agent.js";
-import { runAuditLoop, type LoopReport } from "./loop.js";
+import { parseFindings } from "./findings.js";
+import { runAuditLoop, assistantText, type LoopReport } from "./loop.js";
 import { createExecuteCodeTool } from "./tools/execute-code.js";
 import { createGeneratePocTool } from "./tools/generate-poc.js";
 
@@ -265,6 +266,20 @@ DO NOT: access the network outside the RPC proxy, use real private keys, or writ
 
 If the code is safe, state that clearly and explain the key safety properties you verified.`;
 
+/** Deterministic follow-up when findings ship without any fork verification. */
+export const VERIFICATION_ENFORCEMENT_PROMPT = (count: number) =>
+	`You reported ${count} finding(s) but ran fork.verify for NONE of them. On-chain verification is mandatory, not optional. For each finding now: write a forge PoC and run fork.verify (deps are auto-provisioned and era-matched; match the PoC pragma to the repo era — pre-0.8 repos need pragma experimental ABIEncoderV2). If a finding genuinely cannot be expressed as a fork PoC, say so explicitly and mark it unverified. Then re-report all findings with their verification status.`;
+
+/** fork.verify verdict markers journaled so far (reads the session events file). */
+async function countForkVerdicts(eventsPath: string): Promise<number> {
+	try {
+		const raw = await fs.readFile(eventsPath, "utf-8");
+		return raw.split("ATTIS_FORK_VERDICT").length - 1;
+	} catch {
+		return 0;
+	}
+}
+
 /** The audit-phase user prompt: the repo inventory, injected per roadmap item 3. */
 export function buildRepoAuditPrompt(inv: RepoInventory): string {
 	const files = inv.files.map((f) => `  ${f}`).join("\n");
@@ -402,8 +417,32 @@ async function runRepoAudit(ctx: RepoRunContext): Promise<{ verified: number; fi
 		if (agentError) {
 			throw new Error(`model endpoint error during audit: ${agentError}`);
 		}
-		await journal.close({ verified: report.verifiedFindings.length, findings: report.parsedCount });
-		return { verified: report.verifiedFindings.length, findings: report.parsedCount };
+
+		// Verification enforcement (verify-don't-guess is harness-enforced, not
+		// prompt-hoped): findings reported with zero fork.verify verdicts get
+		// ONE deterministic re-prompt. Measured need: malt/velodrome sessions
+		// reported 6/3 findings with zero verification attempts.
+		let parsedCount = report.parsedCount;
+		if (parsedCount > 0 && (await countForkVerdicts(journal.session.eventsPath)) === 0) {
+			ctx.emit({ type: "step", step: "enforce-verify", count: parsedCount });
+			await agent.prompt(VERIFICATION_ENFORCEMENT_PROMPT(parsedCount));
+			await agent.waitForIdle();
+			const followup = assistantText(agent);
+			await journal.write("audit_result", {
+				output_chars: followup.length, output: followup, enforcement: true,
+			});
+			const reparsed = parseFindings(followup);
+			await journal.write("findings_parsed", {
+				count: reparsed.findings.length, isSafe: reparsed.isSafe,
+				unparseable: reparsed.unparseable, enforcement: true,
+			});
+			if (!reparsed.unparseable && reparsed.findings.length > 0) {
+				parsedCount = reparsed.findings.length;
+			}
+		}
+
+		await journal.close({ verified: report.verifiedFindings.length, findings: parsedCount });
+		return { verified: report.verifiedFindings.length, findings: parsedCount };
 	} catch (err) {
 		// The error lands in the repo's own journal (session_end) and the
 		// manifest — the batch then moves on to the next repo.

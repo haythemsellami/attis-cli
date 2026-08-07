@@ -36,6 +36,8 @@ export interface AuditAgentOptions {
 	tools?: AgentTool<any>[];
 	/** System prompt override (repo rollouts use the kernel-mode prompt). */
 	systemPrompt?: string;
+	/** Sampling temperature (default 0 — audit work wants determinism, not variety). */
+	temperature?: number;
 	onEvent?: (event: AgentEvent) => void;
 }
 
@@ -69,7 +71,8 @@ export function createAuditAgent(opts: AuditAgentOptions = {}): Agent {
 			thinkingLevel: "high",
 			tools: opts.tools ?? [createForkVerifyTool()],
 		},
-		streamFn: models.streamSimple.bind(models),
+		streamFn: (model, context, options) =>
+			models.streamSimple(model, context, { ...options, temperature: opts.temperature ?? 0 }),
 		// Keyless local servers still need a placeholder (pi-ai throws otherwise).
 		getApiKey: () => apiKeyFromEnv(cfg.apiKeyEnv),
 		// execpolicy-style gate: fork execution requires explicit opt-in.

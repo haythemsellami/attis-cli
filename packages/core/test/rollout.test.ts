@@ -31,6 +31,14 @@ import {
 const SAFE_REPLY =
 	"I reviewed the contracts with the kernel. No vulnerabilities found — the code is safe.";
 
+const FINDING_REPLY = `## Findings
+
+### [High] Reentrancy in withdraw()
+
+**Impact:** An attacker can drain the contract's entire ETH balance by re-entering withdraw() before the balance is zeroed.
+
+**Remediation:** Apply checks-effects-interactions.`;
+
 const INVENTORY: RepoInventory = {
 	files: ["src/Vault.sol"],
 	imports: { "src/Vault.sol": ["./IOracle.sol"] },
@@ -557,6 +565,28 @@ describe("runRollout — journaling", () => {
 			expect(types).toContain("report");
 			expect(rec.closed).toEqual([{ verified: 0, findings: 0 }]);
 		}
+	});
+
+	it("re-prompts once when findings ship without fork verification", async () => {
+		const root = await tmpRoot();
+		await makeRepo(root, "repo-a");
+		const journals = fakeJournals();
+		const prompts: string[] = [];
+
+		await runRollout(
+			baseOpts(root, {
+				journalFor: journals.journalFor,
+				createAgent: () => fakeAgent(FINDING_REPLY, prompts),
+			}),
+		);
+
+		// audit prompt + exactly one enforcement turn (never a loop of them)
+		expect(prompts).toHaveLength(2);
+		expect(prompts[1]).toContain("ran fork.verify for NONE of them");
+		const rec = journals.byRepo.get(path.join(root, "repo-a"))!;
+		expect(rec.writes.some((w) => w.type === "audit_result" && w.data.enforcement === true)).toBe(true);
+		expect(rec.writes.some((w) => w.type === "findings_parsed" && w.data.enforcement === true)).toBe(true);
+		expect(rec.closed).toEqual([{ verified: 0, findings: 1 }]);
 	});
 });
 
