@@ -66,11 +66,43 @@ FOUNDRY_ROOT_MAX_DEPTH = 2
 # remappings/config/imports reference them: dep name -> marker substring.
 STD_LIB_REFS = {
     "openzeppelin-contracts": ("@openzeppelin", "openzeppelin-contracts"),
+    # "@openzeppelin/upgrades" is the 2021 hardhat-era alias of the
+    # upgradeable package (see _alias_target for its layout quirks).
     "openzeppelin-contracts-upgradeable": ("@openzeppelin/contracts-upgradeable",
-                                           "openzeppelin-contracts-upgradeable"),
+                                           "openzeppelin-contracts-upgradeable",
+                                           "@openzeppelin/upgrades"),
     "solmate": ("solmate",),
     "solady": ("solady",),
 }
+
+# Next-older era per deps-cache name, for the compile-fallback retry:
+# repo written against OZ v4 APIs compiles neither against latest (v5)
+# nor vice versa, and no pragma can tell them apart — so a compile-mismatch
+# error verdict steps the era down once (v4 era keeps forge-std latest;
+# legacy era takes forge-std-legacy — see _step_down_eras).
+_OLDER_ERA = {
+    "openzeppelin-contracts": "openzeppelin-contracts-v4",
+    "openzeppelin-contracts-v4": "openzeppelin-contracts-legacy",
+    "openzeppelin-contracts-upgradeable": "openzeppelin-contracts-upgradeable-v4",
+    "openzeppelin-contracts-upgradeable-v4": "openzeppelin-contracts-upgradeable-legacy",
+    "forge-std": "forge-std-legacy",
+}
+
+# Forge/solc output that means "compiled against the wrong major of a dep"
+# (never produced by a legitimate PoC revert — fallback fires only on
+# "error" verdicts anyway).
+COMPILE_MISMATCH_MARKERS = (
+    "Wrong argument count for modifier invocation",
+    "Trying to override non-virtual function",
+    "does not override anything",
+    "Overriding function return types differ",
+    "Overriding function is missing",
+    # super.<renamed-method>(...) — the parent contract's API moved.
+    "not found or not visible after argument-dependent lookup in type(contract super",
+)
+
+# The 2021 alias' imports: `@openzeppelin/upgrades/contracts/<suffix>`.
+ALIAS_IMPORT_RE = re.compile(r"""["']@openzeppelin/upgrades/contracts/([^"']+)["']""")
 
 # Canonical remapping each provisioned lib needs for its INTERNAL imports
 # (e.g. openzeppelin-contracts-upgradeable's sources import
@@ -315,7 +347,8 @@ def _referenced_std_libs(text):
     return found
 
 
-def _write_remappings(run_dir, dep_paths, forge_std="forge-std", canonical=None):
+def _write_remappings(run_dir, dep_paths, forge_std="forge-std", canonical=None,
+                      alias_target=None):
     """Template mode remappings: deps-cache libs + repo/=src/repo/.
 
     forge_std is the era-picked variant (deps.pick_dep): latest prefers
@@ -355,6 +388,9 @@ def _write_remappings(run_dir, dep_paths, forge_std="forge-std", canonical=None)
         # imports) and the canonical @-style form.
         lines.append(f"openzeppelin-contracts-upgradeable/={upg}/")
         lines.append(f"@openzeppelin/contracts-upgradeable/={upg}/contracts/")
+    if alias_target:
+        # The 2021 hardhat-era alias of the upgradeable package.
+        lines.append(f"@openzeppelin/upgrades/contracts/={alias_target}/")
     lines.append("repo/=src/repo/")
     with open(os.path.join(run_dir, "remappings.txt"), "w") as f:
         f.write("\n".join(lines) + "\n")
@@ -409,7 +445,7 @@ def _emit_verdict(v):
     extraction keys off ATTIS_FORK_VERDICT in kernel_exec stdout), then return."""
     print("ATTIS_FORK_VERDICT " + json.dumps({
         "verdict": v.get("verdict"), "raw_log_path": v.get("raw_log_path"),
-        "mode": v.get("mode")}))
+        "mode": v.get("mode"), "era": v.get("era")}))
     return v
 
 
@@ -430,12 +466,13 @@ def _run_forge(forge, match_path, cwd, setup, extra_args=None):
         return out + "\n" + err + f"\n<forge timed out after {e.timeout}s>"
 
 
-def _verdict_from(output, mode, log_path):
+def _verdict_from(output, mode, log_path, era=None):
     v = {"verdict": _parse_verdict(output),
          "state_diff": {},
          "traces_summary": _summarize(output),
          "raw_log_path": log_path,
-         "mode": mode}
+         "mode": mode,
+         "era": era}
     if v["verdict"] == "error":
         hint = _missing_import_hint(output)
         if hint:
@@ -461,6 +498,77 @@ def _resolve_foundry_override(setup):
     return full
 
 
+def _is_compile_mismatch(output):
+    """True when forge failed to compile due to a dep version mismatch
+    (API change across OZ majors, or a missing import path). A reverted
+    PoC is a real verdict — callers gate on verdict == "error" first."""
+    if any(m in output for m in COMPILE_MISMATCH_MARKERS):
+        return True
+    return bool(MISSING_IMPORT_RE.search(output)) or "No such file or directory" in output
+
+
+def _era_label(forge_std, oz_deps):
+    """The effective dep era of a provisioning pass: the OZ family's era
+    when OZ deps are provisioned, else forge-std's."""
+    oz = list(oz_deps)
+    if any(d.endswith("-legacy") for d in oz):
+        return "legacy"
+    if any(d.endswith("-v4") for d in oz):
+        return "v4"
+    if oz:
+        return "latest"
+    return "legacy" if forge_std == "forge-std-legacy" else "latest"
+
+
+def _can_step_down(forge_std, oz_deps):
+    """True when any provisioned dep has an older era to fall back to."""
+    return any(_OLDER_ERA.get(d) for d in list(oz_deps) + [forge_std])
+
+
+def _step_down_eras(forge_std, canonical):
+    """One era older, consistently across the forge-std + OZ families:
+    OZ steps latest -> v4 -> legacy; forge-std goes legacy when the OZ
+    family lands on legacy or when no OZ dep is provisioned (the v4 era
+    keeps forge-std latest)."""
+    stepped = {n: (_OLDER_ERA.get(v) or v) for n, v in canonical.items()}
+    if not stepped or any(v.endswith("-legacy") for v in stepped.values()):
+        forge_std = "forge-std-legacy"
+    return forge_std, stepped
+
+
+def _alias_suffixes(text):
+    """Paths referenced via the @openzeppelin/upgrades alias (suffixes
+    after `@openzeppelin/upgrades/contracts/`)."""
+    return ALIAS_IMPORT_RE.findall(text)
+
+
+def _alias_target(deps, texts, upg_path):
+    """Base dir the `@openzeppelin/upgrades/contracts/` prefix should map
+    to, or None when the alias isn't referenced.
+
+    The 2021 npm alias (@openzeppelin/upgrades <= 2.8.0) is the old sdk
+    package with ROOT-LEVEL contracts (contracts/Initializable.sol) — a
+    layout openzeppelin-contracts-upgradeable never shipped (v3+ keeps it
+    at contracts/proxy/). So the target is picked by existence probe:
+    the era-picked upgradeable cache when the referenced paths exist
+    there, else the sdk legacy package (packages/lib/contracts)."""
+    suffixes = _alias_suffixes("\n".join(texts))
+    if not suffixes:
+        return None
+    if upg_path and any(os.path.exists(os.path.join(upg_path, "contracts", s))
+                        for s in suffixes):
+        return os.path.join(upg_path, "contracts")
+    sdk = deps.ensure(["openzeppelin-upgrades-legacy"]).get("openzeppelin-upgrades-legacy")
+    if sdk:
+        base = os.path.join(sdk, "packages", "lib", "contracts")
+        if any(os.path.exists(os.path.join(base, s)) for s in suffixes):
+            return base
+    # Best-effort default: the era-picked package (correct layout for
+    # modern-style alias imports; a wrong guess ends as an error verdict
+    # with the missing-import hint).
+    return os.path.join(upg_path, "contracts") if upg_path else None
+
+
 def _remapping_prefixes(foundry_root):
     """Prefixes the repo already remaps, from remappings.txt AND
     foundry.toml (foundry merges both; a prefix mapped in either covers).
@@ -484,16 +592,17 @@ def _remapping_prefixes(foundry_root):
     return prefixes
 
 
-def _ensure_canonical_remappings(foundry_root, lib_names):
+def _ensure_canonical_remappings(foundry_root, lib_names, extra_lines=()):
     """Append the canonical remapping lines for provisioned libs to the
     repo COPY's remappings.txt (created when absent — foundry merges it
-    with foundry.toml remappings). Skips prefixes the repo already maps
-    (the repo's own target wins) and lines already appended by an earlier
-    verify call in this session. Returns the lines appended."""
+    with foundry.toml remappings). extra_lines are full "prefix=target"
+    entries (e.g. the @openzeppelin/upgrades alias) handled by the same
+    coverage rule. Skips prefixes the repo already maps (the repo's own
+    target wins) and lines already appended by an earlier verify call in
+    this session. Returns the lines appended."""
     prefixes = _remapping_prefixes(foundry_root)
     lines = []
-    for name in lib_names:
-        line = CANONICAL_REMAPPINGS.get(name)
+    for line in [CANONICAL_REMAPPINGS.get(n) for n in lib_names] + list(extra_lines):
         if not line:
             continue
         prefix = line.split("=", 1)[0]
@@ -515,7 +624,7 @@ def _ensure_canonical_remappings(foundry_root, lib_names):
     return lines
 
 
-def _symlink_std_libs(foundry_root, poc_source):
+def _symlink_std_libs(foundry_root, poc_source, step_down=False):
     """Symlink missing standard libs from the deps cache into <root>/lib/.
 
     forge-std always (PoCs import forge-std/Test.sol) — era-picked via
@@ -526,6 +635,12 @@ def _symlink_std_libs(foundry_root, poc_source):
     Afterwards, canonical @-style remappings the libs' internal imports
     need are appended to the copy's remappings.txt (only prefixes the
     repo doesn't already map).
+
+    step_down=True is the compile-fallback retry: every dep is re-picked
+    one era older and OUR symlinks are re-pointed at the older cache
+    dirs (vendored real dirs are never touched).
+
+    Returns (linked, paths, era, can_step_down).
     """
     deps = _deps()
     texts = [poc_source]
@@ -546,20 +661,33 @@ def _symlink_std_libs(foundry_root, poc_source):
     # Era detection scans the repo sources, not the PoC (texts[0]).
     lower, upper = deps.repo_solc_bounds(texts[1:])
     forge_std = deps.pick_dep("forge-std", upper, lower)
+    # canonical lib name -> era-picked cache name (identity for most).
+    canonical = {n: deps.pick_dep(n, upper, lower)
+                 for n in _referenced_std_libs("\n".join(texts))}
+    can_step = _can_step_down(forge_std, canonical.values())
+    if step_down:
+        forge_std, canonical = _step_down_eras(forge_std, canonical)
     # (lib/ dir name, deps-cache name) — era variants still land under the
     # canonical lib/ dir so the repo's remappings resolve unchanged.
     wanted = [("forge-std", forge_std)]
-    wanted += [(n, deps.pick_dep(n, upper, lower))
-               for n in _referenced_std_libs("\n".join(texts))]
-    paths = deps.ensure([dep for _, dep in wanted])
+    wanted += [(n, v) for n, v in canonical.items()]
+    paths = deps.ensure(sorted({dep for _, dep in wanted}))
     linked = []
     lib_dir = os.path.join(foundry_root, "lib")
     for lib_name, dep_name in wanted:
         dest = os.path.join(lib_dir, lib_name)
-        if os.path.lexists(dest) or not paths.get(dep_name):
+        target = paths.get(dep_name)
+        if not target:
+            continue
+        if os.path.islink(dest):
+            if step_down and os.path.realpath(dest) != os.path.realpath(target):
+                os.unlink(dest)  # re-point our symlink at the older era
+            else:
+                continue
+        elif os.path.lexists(dest):
             continue
         os.makedirs(lib_dir, exist_ok=True)
-        os.symlink(paths[dep_name], dest)
+        os.symlink(target, dest)
         linked.append(lib_name)
     # forge-std v1.5.6 imports ds-test from its own lib/ submodule; expose
     # it at lib/ds-test too, where forge's auto-detection definitely looks.
@@ -577,14 +705,35 @@ def _symlink_std_libs(foundry_root, poc_source):
     # canonical lines for every lib now present (provisioned or vendored).
     present = [lib_name for lib_name, _ in wanted
                if os.path.lexists(os.path.join(lib_dir, lib_name))]
-    _ensure_canonical_remappings(foundry_root, present)
-    return linked, paths
+    extra = []
+    upg_path = paths.get(canonical.get("openzeppelin-contracts-upgradeable", ""))
+    alias_base = _alias_target(deps, texts, upg_path)
+    if alias_base:
+        if upg_path and alias_base.startswith(upg_path + os.sep):
+            alias_lib = "openzeppelin-contracts-upgradeable"
+        else:
+            # The old sdk package (packages/lib) — expose it as
+            # lib/openzeppelin-upgrades.
+            alias_lib = "openzeppelin-upgrades"
+            dest = os.path.join(lib_dir, alias_lib)
+            sdk_root = os.path.dirname(alias_base)
+            if not os.path.lexists(dest):
+                os.makedirs(lib_dir, exist_ok=True)
+                os.symlink(sdk_root, dest)
+                linked.append(alias_lib)
+        extra.append(f"@openzeppelin/upgrades/contracts/=lib/{alias_lib}/contracts/")
+    _ensure_canonical_remappings(foundry_root, present, extra)
+    return linked, paths, _era_label(forge_std, canonical.values()), can_step
 
 
 def _verify_repo_mode(forge, poc_source, setup, foundry_root):
     """Run the PoC inside the session's repo copy with the repo's own
-    build setup; the original repo is never touched (see driver.ts)."""
-    _symlink_std_libs(foundry_root, poc_source)
+    build setup; the original repo is never touched (see driver.ts).
+
+    Compile-fallback: an error verdict whose forge output matches a dep
+    version-mismatch signature retries ONCE with every dep stepped one
+    era older (pragmas can't express v4-vs-v5 API differences)."""
+    _l, _p, era, can_step = _symlink_std_libs(foundry_root, poc_source)
     for rel, source in (setup.get("files") or {}).items():
         dest = os.path.realpath(os.path.join(foundry_root, rel))
         if not dest.startswith(foundry_root + os.sep):
@@ -600,6 +749,10 @@ def _verify_repo_mode(forge, poc_source, setup, foundry_root):
         f.write(poc_source)
     try:
         output = _run_forge(forge, match_path, foundry_root, setup)
+        if (can_step and _parse_verdict(output) == "error"
+                and _is_compile_mismatch(output)):
+            _l, _p, era, _c = _symlink_std_libs(foundry_root, poc_source, step_down=True)
+            output = _run_forge(forge, match_path, foundry_root, setup)
     finally:
         # The PoC never outlives its run — the copy must stay diff-clean
         # for the audit trail (lib/ symlinks stay; they are idempotent).
@@ -609,13 +762,15 @@ def _verify_repo_mode(forge, poc_source, setup, foundry_root):
     log_path = os.path.join(runs_dir, f"forge-output-{int(time.time() * 1000)}.log")
     with open(log_path, "w") as f:
         f.write(output)
-    return output, log_path
+    return output, log_path, era
 
 
-def _verify_template_mode(forge, poc_source, setup):
+def _verify_template_mode(forge, poc_source, setup, step_down=False):
     """Bare template workspace + the repo's .sol tree staged under
     src/repo/ + remappings into the deps cache. forge-std is era-picked
-    from the staged sources (pre-0.8.13 repos get forge-std-legacy)."""
+    from the staged sources (pre-0.8.13 repos get forge-std-legacy).
+    step_down=True is the compile-fallback retry (one era older).
+    Returns (output, log_path, era, can_step_down)."""
     run_dir = _materialize(poc_source, setup.get("files"))
     _stage_repo_sources(run_dir)
     deps = _deps()
@@ -635,14 +790,20 @@ def _verify_template_mode(forge, poc_source, setup):
     forge_std = deps.pick_dep("forge-std", upper, lower)
     # canonical lib name -> era-picked cache name (identity for most).
     canonical = {n: deps.pick_dep(n, upper, lower) for n in wanted}
+    can_step = _can_step_down(forge_std, canonical.values())
+    if step_down:
+        forge_std, canonical = _step_down_eras(forge_std, canonical)
     ensure_names = sorted(set(canonical.values()) | {forge_std})
     dep_paths = deps.ensure(ensure_names)
-    _write_remappings(run_dir, dep_paths, forge_std, canonical)
+    alias_base = _alias_target(deps, texts + [poc_source],
+                               dep_paths.get(canonical.get(
+                                   "openzeppelin-contracts-upgradeable", "")))
+    _write_remappings(run_dir, dep_paths, forge_std, canonical, alias_base)
     output = _run_forge(forge, "test/Poc.t.sol", run_dir, setup)
     log_path = os.path.join(run_dir, "forge-output.log")
     with open(log_path, "w") as f:
         f.write(output)
-    return output, log_path
+    return output, log_path, _era_label(forge_std, canonical.values()), can_step
 
 
 def verify(poc_source, setup=None):
@@ -659,6 +820,7 @@ def verify(poc_source, setup=None):
 
     Returns {"verdict": "verified" | "reverted" | "error",
              "mode": "repo" | "template",
+             "era": "latest" | "v4" | "legacy" (dep era actually used),
              "state_diff": {...best-effort...},
              "traces_summary": str, "raw_log_path": str,
              "missing_import": str (error verdicts, when parseable)}.
@@ -682,10 +844,14 @@ def verify(poc_source, setup=None):
         foundry_root = find_foundry_root(CTX["repo_root"])
     if foundry_root:
         mode = "repo"
-        output, log_path = _verify_repo_mode(forge, poc_source, setup, foundry_root)
+        output, log_path, era = _verify_repo_mode(forge, poc_source, setup, foundry_root)
     else:
         mode = "template"
-        output, log_path = _verify_template_mode(forge, poc_source, setup)
-    v = _verdict_from(output, mode, log_path)
+        output, log_path, era, can_step = _verify_template_mode(forge, poc_source, setup)
+        if (can_step and _parse_verdict(output) == "error"
+                and _is_compile_mismatch(output)):
+            output, log_path, era, _c = _verify_template_mode(
+                forge, poc_source, setup, step_down=True)
+    v = _verdict_from(output, mode, log_path, era)
     v["raw_log_path"] = _durable_log(log_path, mode)
     return _emit_verdict(v)

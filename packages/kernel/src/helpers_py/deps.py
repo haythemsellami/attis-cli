@@ -64,6 +64,13 @@ DEPS = {
     "openzeppelin-contracts-upgradeable-v4":
         {"url": "https://github.com/OpenZeppelin/openzeppelin-contracts-upgradeable",
          "branch": "v4.9.6"},
+    # The 2021 hardhat-era @openzeppelin/upgrades npm package (max 2.8.0)
+    # IS this old sdk package — ROOT-level contracts (contracts/
+    # Initializable.sol), a layout the upgradeable package never shipped.
+    # fork.py's alias probe maps @openzeppelin/upgrades/ imports here when
+    # the era-picked upgradeable cache doesn't carry the referenced path.
+    "openzeppelin-upgrades-legacy": {"url": "https://github.com/OpenZeppelin/openzeppelin-sdk",
+                                     "branch": "v2.8.2"},
     "solmate": {"url": "https://github.com/transmissions11/solmate"},
     "solady": {"url": "https://github.com/Vectorized/solady"},
 }

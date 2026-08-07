@@ -247,7 +247,7 @@ A Solidity repo is mounted in your persistent audit kernel. Explore it with the 
 
 Analyze the code carefully: trace value flow across contracts, check access control, review external calls, and simulate adversarial interactions. Verify every candidate finding with a fork PoC (fork.verify) before reporting it.
 
-fork.verify handles dependencies automatically (forge-std/OpenZeppelin/solmate/solady, era-matched to the repo's pragmas) and runs the PoC inside the repo's own foundry project when one exists. Write the PoC's pragma to match the repo era: for pre-0.8 repos use pragma solidity >=0.6.6 plus pragma abicoder v2 — a ^0.8.x PoC cannot compile against a pre-0.8 contract.
+fork.verify handles dependencies automatically (forge-std/OpenZeppelin/solmate/solady, era-matched to the repo's pragmas, with one compile-fallback retry) and runs the PoC inside the repo's own foundry project when one exists. Write the PoC's pragma to match the repo era: for pre-0.8 repos use pragma solidity >=0.6.x plus pragma experimental ABIEncoderV2 (the abicoder v2 spelling is rejected by solc 0.6.x) — a ^0.8.x PoC cannot compile against a pre-0.8 contract.
 
 For each finding, report:
 - **Severity:** Critical, High, Medium, or Low

@@ -560,8 +560,9 @@ describe("kernel fork.verify markers (repo-mode ground truth)", () => {
 	});
 
 	it("treats the marker's additive mode field as opaque", async () => {
-		// fork.verify gained "mode" ("repo"|"template"); the exporter reads
-		// only verdict/raw_log_path and must keep labeling as before.
+		// fork.verify gained "mode" ("repo"|"template") and "era"; the
+		// exporter reads only verdict/raw_log_path and must keep labeling
+		// as before.
 		const ev = stamper();
 		const eventsPath = await writeSession(root, "marker-mode", [
 			ev("session_start", { workdir: "/repos/v" }),
@@ -569,7 +570,7 @@ describe("kernel fork.verify markers (repo-mode ground truth)", () => {
 			ev(
 				"kernel_exec",
 				kernelExec("fork.verify(poc)", {
-					stdout: 'ATTIS_FORK_VERDICT {"verdict": "verified", "raw_log_path": "/x", "mode": "repo"}\n',
+					stdout: 'ATTIS_FORK_VERDICT {"verdict": "verified", "raw_log_path": "/x", "mode": "repo", "era": "v4"}\n',
 				}),
 			),
 			ev("audit_result", { output_chars: 10, output: "analysis" }),

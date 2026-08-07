@@ -233,10 +233,101 @@ contract PocTest is Test {
 }
 `;
 
+// malt alias fixture (template-mode): the 2021 hardhat-era alias
+// @openzeppelin/upgrades, whose Initializable sits at the contracts/ ROOT
+// of the old sdk package (openzeppelin-sdk v2.8.x, pragma <0.7.0).
+const MALT_ALIAS_VAULT = `// SPDX-License-Identifier: MIT
+pragma solidity >=0.6.6;
+import "@openzeppelin/upgrades/contracts/Initializable.sol";
+contract MaltInitVault is Initializable {
+    uint256 public total;
+    function initialize() public initializer { total = 0; }
+    function deposit() external payable { total += msg.value; }
+}
+`;
+
+const POC_TEMPLATE_ALIAS = `// SPDX-License-Identifier: MIT
+// solc 0.6.x spelling (the sdk package caps the graph at <0.7.0) —
+// "abicoder v2" only exists on >=0.7.x.
+pragma solidity >=0.6.6;
+pragma experimental ABIEncoderV2;
+import "forge-std/Test.sol";
+import "repo/src/MaltInitVault.sol";
+contract PocTest is Test {
+    MaltInitVault vault;
+    function setUp() public {
+        vault = new MaltInitVault();
+        vault.initialize();
+    }
+    function test_deposit_lands() public {
+        vm.deal(address(this), 1 ether);
+        vault.deposit{value: 1 ether}();
+        assertEq(vault.total(), 1 ether);
+    }
+}
+`;
+
+// escher fallback fixture (repo-mode): written against the OZ v4 API
+// (_beforeTokenTransfer — renamed _update in v5) with a pragma that
+// satisfies BOTH majors, so only the compile-fallback can pick v4.
+const V4_API_TOKEN = `// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.17;
+import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+contract V4Token is ERC20 {
+    constructor() ERC20("V4Token", "V4T") { _mint(msg.sender, 1000 ether); }
+    function _beforeTokenTransfer(address from, address to, uint256 amount)
+        internal override
+    {
+        super._beforeTokenTransfer(from, to, amount);
+    }
+}
+`;
+
+// One-retry-cap probe: v4-style override (fails v5) AND a v3-only import
+// path (fails v4, exists only in legacy) — legacy WOULD compile both, so
+// an "error" verdict stamped era "v4" proves exactly one retry happened.
+const CAP_PROBE_TOKEN = `// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.17;
+import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import "@openzeppelin/contracts/math/SafeMath.sol";
+contract CapProbe is ERC20 {
+    using SafeMath for uint256;
+    constructor() ERC20("CapProbe", "CAP") { _mint(msg.sender, 1000 ether); }
+    function _beforeTokenTransfer(address from, address to, uint256 amount)
+        internal override
+    {
+        super._beforeTokenTransfer(from, to, amount);
+    }
+}
+`;
+
+const POC_V4_STYLE = `// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+import "forge-std/Test.sol";
+import "../../src/V4Token.sol";
+contract PocTest is Test {
+    V4Token token;
+    function setUp() public { token = new V4Token(); }
+    function test_supply() public view { assertEq(token.totalSupply(), 1000 ether); }
+}
+`;
+
+const POC_CAP_PROBE = `// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+import "forge-std/Test.sol";
+import "../../src/CapProbe.sol";
+contract PocTest is Test {
+    CapProbe token;
+    function setUp() public { token = new CapProbe(); }
+    function test_supply() public view { assertEq(token.totalSupply(), 1000 ether); }
+}
+`;
+
 interface Marker {
 	verdict?: string;
 	raw_log_path?: string | null;
 	mode?: string | null;
+	era?: string | null;
 }
 
 function parseMarker(stdout: string): Marker {
@@ -462,7 +553,7 @@ describe.skipIf(!hasPython)("deps cache + foundry-root detection (real python3)"
 		await fs.writeFile(path.join(proj, "src", "UpgradeableVault.sol"), UPGR_VAULT);
 
 		const r = await kernel.exec(
-			`linked, _paths = fork._symlink_std_libs(${JSON.stringify(await fs.realpath(proj))}, "")\n` +
+			`linked, _paths, _era, _can_step = fork._symlink_std_libs(${JSON.stringify(await fs.realpath(proj))}, "")\n` +
 				"sorted(linked)",
 		);
 		expect(r.ok).toBe(true);
@@ -539,7 +630,7 @@ describe.skipIf(!hasPython)("deps cache + foundry-root detection (real python3)"
 		);
 		const real = await fs.realpath(proj);
 		const r = await kernel.exec(
-			`linked, _paths = fork._symlink_std_libs(${JSON.stringify(real)}, "")\nsorted(linked)`,
+			`linked, _paths, _era, _can_step = fork._symlink_std_libs(${JSON.stringify(real)}, "")\nsorted(linked)`,
 		);
 		expect(r.ok).toBe(true);
 		expect(r.result).toContain("'openzeppelin-contracts'");
@@ -549,6 +640,102 @@ describe.skipIf(!hasPython)("deps cache + foundry-root detection (real python3)"
 		const remappings = await fs.readFile(path.join(real, "remappings.txt"), "utf-8");
 		expect(remappings).toContain("@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/");
 		expect(remappings).toContain("forge-std/=lib/forge-std/src/");
+	});
+
+	it("alias detection: @openzeppelin/upgrades flags the upgradeable family (+pairing)", async () => {
+		const r = await kernel.exec(
+			"(\n" +
+				"    sorted(fork._referenced_std_libs(" +
+				"'import \"@openzeppelin/upgrades/contracts/Initializable.sol\";')),\n" +
+				"    fork._alias_suffixes(" +
+				"'import \"@openzeppelin/upgrades/contracts/Initializable.sol\";'),\n" +
+				"    fork._alias_suffixes('import \"@openzeppelin/contracts/token/ERC20/ERC20.sol\";'),\n" +
+				")",
+		);
+		expect(r.ok).toBe(true);
+		expect(r.result).toBe(
+			"(['openzeppelin-contracts', 'openzeppelin-contracts-upgradeable'], " +
+				"['Initializable.sol'], [])",
+		);
+	});
+
+	it("alias target probe: era-picked cache when the path exists there, else the sdk package", async () => {
+		// Fake both candidate caches (no network): the upgradeable legacy
+		// clone with ONLY the modern layout, the sdk clone with the root
+		// layout.
+		const upg = path.join(depsDir, "openzeppelin-contracts-upgradeable-legacy");
+		await fs.mkdir(path.join(upg, "contracts", "proxy"), { recursive: true });
+		await fs.writeFile(path.join(upg, "contracts", "proxy", "Initializable.sol"), "x");
+		const sdk = path.join(depsDir, "openzeppelin-upgrades-legacy", "packages", "lib", "contracts");
+		await fs.mkdir(sdk, { recursive: true });
+		await fs.writeFile(path.join(sdk, "Initializable.sol"), "x");
+		const r = await kernel.exec(
+			"d = fork._deps()\n" +
+				`upg = ${JSON.stringify(upg)}\n` +
+				"(\n" +
+				// root-layout suffix -> sdk package
+				"    fork._alias_target(d, ['import \"@openzeppelin/upgrades/contracts/Initializable.sol\";'], upg),\n" +
+				// modern-layout suffix -> the era-picked upgradeable cache
+				"    fork._alias_target(d, ['import \"@openzeppelin/upgrades/contracts/proxy/Initializable.sol\";'], upg),\n" +
+				// alias not referenced -> None
+				"    fork._alias_target(d, ['import \"forge-std/Test.sol\";'], upg),\n" +
+				")",
+		);
+		expect(r.ok).toBe(true);
+		expect(r.result).toBe(
+			`('${path.join(sdk)}', '${path.join(upg, "contracts")}', None)`,
+		);
+	});
+
+	it("compile-mismatch patterns trigger the fallback; reverts never do", async () => {
+		const r = await kernel.exec(
+			"(\n" +
+				"    fork._is_compile_mismatch('Error: Wrong argument count for modifier invocation'),\n" +
+				"    fork._is_compile_mismatch('Trying to override non-virtual function. Did you forget to add \"virtual\"?'),\n" +
+				"    fork._is_compile_mismatch('Function has override specified but does not override anything.'),\n" +
+				"    fork._is_compile_mismatch('Member \"_beforeTokenTransfer\" not found or not visible after argument-dependent lookup in type(contract super V4Token).'),\n" +
+				"    fork._is_compile_mismatch('Overriding function return types differ'),\n" +
+				"    fork._is_compile_mismatch('Source \"@openzeppelin/contracts/math/SafeMath.sol\" not found: File not found.'),\n" +
+				"    fork._is_compile_mismatch('[FAIL. Reason: Insufficient balance]'),\n" +
+				"    fork._is_compile_mismatch('Suite result: FAILED. 0 passed; 1 failed'),\n" +
+				")",
+		);
+		expect(r.ok).toBe(true);
+		expect(r.result).toBe("(True, True, True, True, True, True, False, False)");
+	});
+
+	it("era step-down: one older, consistent across families, capped at legacy", async () => {
+		const r = await kernel.exec(
+			"(\n" +
+				"    fork._can_step_down('forge-std', []),\n" +
+				"    fork._can_step_down('forge-std-legacy', ['openzeppelin-contracts-legacy']),\n" +
+				"    fork._step_down_eras('forge-std', {'openzeppelin-contracts': 'openzeppelin-contracts'}),\n" +
+				"    fork._step_down_eras('forge-std', {'openzeppelin-contracts': 'openzeppelin-contracts-v4'}),\n" +
+				"    fork._step_down_eras('forge-std', {}),\n" +
+				"    fork._era_label('forge-std-legacy', ['openzeppelin-contracts-v4']),\n" +
+				"    fork._era_label('forge-std', []),\n" +
+				")",
+		);
+		expect(r.ok).toBe(true);
+		expect(r.result).toBe(
+			"(True, False, " +
+				"('forge-std', {'openzeppelin-contracts': 'openzeppelin-contracts-v4'}), " +
+				"('forge-std-legacy', {'openzeppelin-contracts': 'openzeppelin-contracts-legacy'}), " +
+				"('forge-std-legacy', {}), 'v4', 'latest')",
+		);
+	});
+
+	it("template-mode remappings emit the alias line when a target is given", async () => {
+		const runDir = path.join(root, "alias-remap");
+		await fs.mkdir(path.join(runDir, "lib", "forge-std", "src"), { recursive: true });
+		const r = await kernel.exec(
+			`fork._write_remappings(${JSON.stringify(runDir)}, ` +
+				"{'openzeppelin-contracts-upgradeable': '/cache/upg'}, " +
+				"'forge-std', {}, '/cache/upg/contracts')\n" +
+				`open(${JSON.stringify(path.join(runDir, "remappings.txt"))}).read()`,
+		);
+		expect(r.ok).toBe(true);
+		expect(r.result).toContain("@openzeppelin/upgrades/contracts/=/cache/upg/contracts/");
 	});
 
 	it("find_foundry_root: root-level foundry.toml wins", async () => {
@@ -959,5 +1146,115 @@ describe.skipIf(!canIntegrate)("repo-mode canonical remappings (escher-style, re
 		expect(after.match(/@openzeppelin\/contracts\/=lib\/openzeppelin-contracts\/contracts\//g))
 			.toHaveLength(1);
 		expect(after).toBe(remappings);
+	}, 320_000);
+});
+
+describe.skipIf(!canIntegrate)("template-mode @openzeppelin/upgrades alias (malt-style, real forge + clone)", () => {
+	let root: string;
+	let depsDir: string;
+	let kernel: Kernel;
+	let aliasReady = false;
+
+	beforeAll(async () => {
+		root = await fs.mkdtemp(path.join(os.tmpdir(), "attis-alias-int-"));
+		const repoDir = path.join(root, "repo");
+		depsDir = path.join(root, "deps");
+		await fs.mkdir(path.join(repoDir, "src"), { recursive: true });
+		await fs.writeFile(path.join(repoDir, "src", "MaltInitVault.sol"), MALT_ALIAS_VAULT);
+		kernel = await makeKernel(
+			repoDir,
+			path.join(root, "scratch"),
+			depsDir,
+			path.join(root, "journal"),
+		);
+		const warm = await kernel.exec(
+			"res = deps.ensure(['openzeppelin-upgrades-legacy', " +
+				"'openzeppelin-contracts-upgradeable-legacy', 'openzeppelin-contracts-legacy', " +
+				"'forge-std-legacy'])\n" +
+				"all(v is not None for v in res.values())",
+			{ timeoutMs: 300_000 },
+		);
+		aliasReady = warm.result === "True";
+	}, 330_000);
+
+	afterAll(async () => {
+		await kernel.stop();
+		await fs.rm(root, { recursive: true, force: true });
+	});
+
+	it(">=0.6.6 repo importing @openzeppelin/upgrades/contracts/Initializable.sol reaches a real verdict", async (ctx) => {
+		if (!aliasReady) ctx.skip();
+		const poc = JSON.stringify(POC_TEMPLATE_ALIAS);
+		const r = await kernel.exec(`fork.verify(${poc})`, { timeoutMs: 300_000 });
+		expect(r.ok).toBe(true);
+		const marker = parseMarker(r.stdout);
+		expect(marker.mode).toBe("template");
+		expect(marker.era).toBe("legacy");
+		expect(["verified", "reverted"]).toContain(marker.verdict);
+		expect(r.result).toContain("'verified'");
+		await expect(fs.access(path.join(depsDir, "openzeppelin-upgrades-legacy"))).resolves.toBeUndefined();
+	}, 320_000);
+});
+
+describe.skipIf(!canIntegrate)("compile-fallback era step-down (v4 API repo, real forge + clone)", () => {
+	let root: string;
+	let v4RepoDir: string;
+	let capRepoDir: string;
+	let kernelV4: Kernel;
+	let kernelCap: Kernel;
+	let depsReady = false;
+
+	beforeAll(async () => {
+		root = await fs.mkdtemp(path.join(os.tmpdir(), "attis-fallback-int-"));
+		v4RepoDir = path.join(root, "repo-v4");
+		capRepoDir = path.join(root, "repo-cap");
+		for (const [dir, source] of [[v4RepoDir, V4_API_TOKEN], [capRepoDir, CAP_PROBE_TOKEN]] as const) {
+			await fs.mkdir(path.join(dir, "src"), { recursive: true });
+			await fs.writeFile(path.join(dir, "foundry.toml"), FOUNDRY_TOML);
+		}
+		await fs.writeFile(path.join(v4RepoDir, "src", "V4Token.sol"), V4_API_TOKEN);
+		await fs.writeFile(path.join(capRepoDir, "src", "CapProbe.sol"), CAP_PROBE_TOKEN);
+		kernelV4 = await makeKernel(v4RepoDir, path.join(root, "scratch-v4"), path.join(root, "deps"), path.join(root, "journal-v4"));
+		kernelCap = await makeKernel(capRepoDir, path.join(root, "scratch-cap"), path.join(root, "deps"), path.join(root, "journal-cap"));
+		const warm = await kernelV4.exec(
+			'res = deps.ensure(["openzeppelin-contracts", "openzeppelin-contracts-v4", "forge-std"])\n' +
+				"all(v is not None for v in res.values())",
+			{ timeoutMs: 300_000 },
+		);
+		depsReady = warm.result === "True";
+	}, 330_000);
+
+	afterAll(async () => {
+		await kernelV4.stop();
+		await kernelCap.stop();
+		await fs.rm(root, { recursive: true, force: true });
+	});
+
+	it("v4-API repo fails against latest, falls back to v4, reaches a real verdict (era noted)", async (ctx) => {
+		if (!depsReady) ctx.skip();
+		const poc = JSON.stringify(POC_V4_STYLE);
+		const r = await kernelV4.exec(`fork.verify(${poc})`, { timeoutMs: 300_000 });
+		expect(r.ok).toBe(true);
+		const marker = parseMarker(r.stdout);
+		expect(marker.mode).toBe("repo");
+		expect(marker.era).toBe("v4");
+		expect(["verified", "reverted"]).toContain(marker.verdict);
+		expect(r.result).toContain("'verified'");
+		// The symlink was re-pointed at the v4 cache by the fallback.
+		const ozLink = await fs.readlink(path.join(v4RepoDir, "lib", "openzeppelin-contracts"));
+		expect(ozLink).toContain("openzeppelin-contracts-v4");
+	}, 320_000);
+
+	it("fallback retries at most once per verify call", async (ctx) => {
+		if (!depsReady) ctx.skip();
+		const poc = JSON.stringify(POC_CAP_PROBE);
+		const r = await kernelCap.exec(`fork.verify(${poc})`, { timeoutMs: 300_000 });
+		expect(r.ok).toBe(true);
+		const marker = parseMarker(r.stdout);
+		// latest fails (v4-style override), v4 fails (math/SafeMath is
+		// legacy-only). Legacy WOULD compile both — so an error stamped
+		// "v4" proves the retry stopped after one step.
+		expect(marker.verdict).toBe("error");
+		expect(marker.era).toBe("v4");
 	}, 320_000);
 });
