@@ -38,6 +38,10 @@ export interface AuditAgentOptions {
 	systemPrompt?: string;
 	/** Sampling temperature (default 0 — audit work wants determinism, not variety). */
 	temperature?: number;
+	/** Per-request timeout in ms (default ATTIS_TIMEOUT_MS ?? 600000 — thinking
+	 *  requests on large transcripts take minutes; short defaults caused the
+	 *  batch-2 timeout wave). */
+	timeoutMs?: number;
 	onEvent?: (event: AgentEvent) => void;
 }
 
@@ -72,7 +76,11 @@ export function createAuditAgent(opts: AuditAgentOptions = {}): Agent {
 			tools: opts.tools ?? [createForkVerifyTool()],
 		},
 		streamFn: (model, context, options) =>
-			models.streamSimple(model, context, { ...options, temperature: opts.temperature ?? 0 }),
+			models.streamSimple(model, context, {
+				...options,
+				temperature: opts.temperature ?? 0,
+				timeoutMs: opts.timeoutMs ?? Number(process.env.ATTIS_TIMEOUT_MS ?? 600_000),
+			}),
 		// Keyless local servers still need a placeholder (pi-ai throws otherwise).
 		getApiKey: () => apiKeyFromEnv(cfg.apiKeyEnv),
 		// execpolicy-style gate: fork execution requires explicit opt-in.
