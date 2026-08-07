@@ -11,8 +11,10 @@
  * Labels: any verified finding (fork_verdict verified / finding_kept /
  * kernel fork.verify ATTIS_FORK_VERDICT marker) → gold_positive; only
  * failed verifications (reverted beyond retries / finding_dropped with
- * verification_failed / failed kernel verdicts) → hard_negative; no
- * verdict journaled → unlabeled (exported, marked).
+ * verification_failed / failed kernel verdicts) → hard_negative; audit
+ * concluded safe or parsed zero findings → safe_verdict; findings reported
+ * with zero fork verdicts → unverified_findings; no findings_parsed event
+ * at all → unlabeled (degenerate/incomplete).
  *
  * Every row is validated before it ships (role order, tool_call pairing,
  * JSON arguments, non-empty content). Invalid rows are dropped with a
@@ -40,7 +42,12 @@ export interface ChatMessage {
 	tool_call_id?: string;
 }
 
-export type RowLabel = "gold_positive" | "hard_negative" | "unlabeled";
+export type RowLabel =
+	| "gold_positive" // fork-verified finding(s) present
+	| "hard_negative" // verification attempted, failed/reverted
+	| "safe_verdict" // audit concluded safe / zero findings parsed
+	| "unverified_findings" // findings reported, zero fork verdicts
+	| "unlabeled"; // degenerate: no findings_parsed event at all
 
 /** Canonical verdict marker printed by the kernel's fork.verify helper —
  *  the repo-mode ground truth for labels (v1's fork_verdict events only
@@ -210,6 +217,10 @@ interface SessionState {
 	kernelExecs: number;
 	seenPrompt: boolean;
 	inventoryFiles?: number;
+	/** Max findings count across findings_parsed events (0 once parsed). */
+	findingsReported: number;
+	sawSafe: boolean;
+	sawFindingsParsed: boolean;
 }
 
 function str(v: unknown): string | undefined {
@@ -388,6 +399,9 @@ export async function exportSession(eventsPath: string): Promise<SessionExport> 
 		droppedFindings: 0,
 		kernelExecs: 0,
 		seenPrompt: false,
+		findingsReported: 0,
+		sawSafe: false,
+		sawFindingsParsed: false,
 	};
 
 	for (const ev of events) {
@@ -429,6 +443,9 @@ export async function exportSession(eventsPath: string): Promise<SessionExport> 
 				break;
 			}
 			case "findings_parsed": {
+				st.sawFindingsParsed = true;
+				st.findingsReported = Math.max(st.findingsReported, num(ev.data.count) ?? 0);
+				if (ev.data.isSafe === true) st.sawSafe = true;
 				const text = str(ev.data.text) ?? str(ev.data.output);
 				if (text) st.messages.push({ role: "assistant", content: text });
 				break;
@@ -458,7 +475,15 @@ export async function exportSession(eventsPath: string): Promise<SessionExport> 
 	flushPoc(st);
 
 	const label: RowLabel =
-		st.sawVerified || st.kept > 0 ? "gold_positive" : st.sawFailed ? "hard_negative" : "unlabeled";
+		st.sawVerified || st.kept > 0
+			? "gold_positive"
+			: st.sawFailed
+				? "hard_negative"
+				: !st.sawFindingsParsed
+					? "unlabeled"
+					: st.sawSafe || st.findingsReported === 0
+						? "safe_verdict"
+						: "unverified_findings";
 	const row: TrainingRow = {
 		messages: st.messages,
 		metadata: {

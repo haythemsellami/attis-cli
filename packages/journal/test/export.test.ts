@@ -255,13 +255,29 @@ describe("exportSession", () => {
 		expect(validateRow(out.rows[0])).toEqual([]);
 	});
 
-	it("exports sessions without verdicts as unlabeled", async () => {
+	it("labels a zero-finding safe audit as safe_verdict", async () => {
 		const eventsPath = await writeSession(path.join(root, "plain"), "sess-plain", unlabeledSession("/repos/epsilon"));
 		const out = await exportSession(eventsPath);
 
 		expect(out.rows).toHaveLength(1);
 		expect(out.dropped).toBe(0);
-		expect(out.rows[0].metadata.label).toBe("unlabeled");
+		expect(out.rows[0].metadata.label).toBe("safe_verdict");
+		expect(validateRow(out.rows[0])).toEqual([]);
+	});
+
+	it("labels findings without any fork verdict as unverified_findings", async () => {
+		const ev = stamper();
+		const eventsPath = await writeSession(path.join(root, "noveri"), "sess-noveri", [
+			ev("session_start", { workdir: "/repos/zeta" }),
+			ev("audit_prompt", { prompt: "Audit this contract…", system: "SYS" }),
+			ev("audit_result", { output_chars: 40, output: "### [High] Reentrancy in withdraw()" }),
+			ev("findings_parsed", { count: 1, isSafe: false, unparseable: false }),
+			ev("report", { verified: 0, dropped: 0, parsed: 1, agentVerified: true }),
+			ev("session_end", {}),
+		]);
+		const out = await exportSession(eventsPath);
+		expect(out.rows).toHaveLength(1);
+		expect(out.rows[0].metadata.label).toBe("unverified_findings");
 		expect(validateRow(out.rows[0])).toEqual([]);
 	});
 
@@ -408,7 +424,7 @@ describe("exportRollout", () => {
 		expect(out.sessions).toBe(2);
 		expect(out.rows).toHaveLength(2);
 		expect(out.dropped).toBe(0);
-		expect(out.rows.map((r) => r.metadata.label)).toEqual(["gold_positive", "unlabeled"]);
+		expect(out.rows.map((r) => r.metadata.label)).toEqual(["gold_positive", "safe_verdict"]);
 		expect(out.warnings.some((w) => w.includes("missing"))).toBe(true);
 	});
 
@@ -508,7 +524,7 @@ describe("exportRollout", () => {
 
 		expect(out.sessions).toBe(2);
 		expect(out.rows).toHaveLength(2);
-		expect(out.rows.map((r) => r.metadata.label)).toEqual(["gold_positive", "unlabeled"]);
+		expect(out.rows.map((r) => r.metadata.label)).toEqual(["gold_positive", "safe_verdict"]);
 		expect(out.rows.map((r) => r.metadata.session_id)).toEqual(["sess-1", "sess-2"]);
 	});
 

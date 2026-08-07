@@ -106,7 +106,7 @@ describe("flywheel: loop → journal → training row", () => {
 		expect(dropped).toBe(0);
 		expect(rows).toHaveLength(1);
 		const [row] = rows;
-		expect(row.metadata.label).toBe("unlabeled");
+		expect(row.metadata.label).toBe("safe_verdict");
 		expect(validateRow(row)).toEqual([]);
 		expect(row.messages[0]).toMatchObject({ role: "system", content: SYSTEM_PROMPT });
 		expect(row.messages[1].role).toBe("user");
@@ -140,11 +140,11 @@ describe("flywheel: loop → journal → training row", () => {
 			.find((e) => e.type === "report");
 		expect(reportEvent?.data).toMatchObject({ parsed: 1, agentVerified: true });
 
-		// No verdicts in repo mode without a kernel marker → unlabeled, valid row.
+		// Findings parsed but zero kernel verdicts → unverified_findings.
 		const { rows, dropped } = await exportSession(journal.session.eventsPath);
 		expect(dropped).toBe(0);
 		expect(rows).toHaveLength(1);
-		expect(rows[0].metadata.label).toBe("unlabeled");
+		expect(rows[0].metadata.label).toBe("unverified_findings");
 		expect(validateRow(rows[0])).toEqual([]);
 	});
 
